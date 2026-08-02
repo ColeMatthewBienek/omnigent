@@ -273,22 +273,13 @@ def register_core_routes(
             _publish_terminal_pending(resp.id, True)
         _rc = await _get_runner_client(resp.id, runner_router)
         if _rc is not None and conv is not None:
-            try:
-                await _rc.post(
-                    "/v1/sessions",
-                    json={
-                        "session_id": resp.id,
-                        "agent_id": conv.agent_id,
-                        "sub_agent_name": conv.sub_agent_name,
-                    },
-                    timeout=10.0,
-                )
-            except (httpx.HTTPError, ConnectionError):
-                _logger.warning(
-                    "Failed to notify runner about session %s",
-                    resp.id,
-                    exc_info=True,
-                )
+            await _ensure_runner_session_initialized(
+                resp.id,
+                conv,
+                _rc,
+                conversation_store,
+                initializer=getattr(request.app.state, "runner_session_initializer", None),
+            )
         # Grant the creator ownership BEFORE any host launch so the
         # launch's session-ownership check (shared with
         # POST /v1/hosts/{host_id}/runners via resolve_host_launch)
@@ -1639,26 +1630,17 @@ def register_core_routes(
                     session_id,
                 )
                 if _runner_client is not None and conv is not None:
-                    try:
-                        runner_init_resp = await _runner_client.post(
-                            "/v1/sessions",
-                            json={
-                                "session_id": session_id,
-                                "agent_id": conv.agent_id,
-                                "sub_agent_name": conv.sub_agent_name,
-                            },
-                            timeout=10.0,
-                        )
-                        if runner_init_resp.status_code < 400:
-                            await _publish_runner_recovered_status(session_id, conversation_store)
-                    except (httpx.HTTPError, ConnectionError):
-                        # ConnectionError covers a tunnel close mid-POST
-                        # (same source as the relay's except clause).
-                        _logger.warning(
-                            "Failed to notify runner about session %s",
-                            session_id,
-                            exc_info=True,
-                        )
+                    await _ensure_runner_session_initialized(
+                        session_id,
+                        conv,
+                        _runner_client,
+                        conversation_store,
+                        initializer=getattr(
+                            request.app.state,
+                            "runner_session_initializer",
+                            None,
+                        ),
+                    )
                 if _runner_client is None:
                     # Runner deregistered between validation and
                     # lookup; PATCH still returns 200 but no
