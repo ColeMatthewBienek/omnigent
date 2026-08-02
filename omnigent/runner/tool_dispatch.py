@@ -434,7 +434,11 @@ _NATIVE_RELAY_BUILTIN_TOOLS = (
 )
 
 
-def build_native_relay_tool_schemas(spec: AgentSpec | None) -> list[_JsonObject]:
+def build_native_relay_tool_schemas(
+    spec: AgentSpec | None,
+    *,
+    smart_routing_available: bool = False,
+) -> list[_JsonObject]:
     """Build the flat Omnigent tool surface for native harness bridges.
 
     Returns the same tool set the claude-native / codex-native relay advertises
@@ -451,6 +455,8 @@ def build_native_relay_tool_schemas(spec: AgentSpec | None) -> list[_JsonObject]
     :param spec: The session's resolved agent spec. ``None`` falls back to the
         always-on read/discovery surface (never the opt-in spawn writes, whose
         gate can't be evaluated without the spec), mirroring the relay.
+    :param smart_routing_available: Whether the owning server can execute
+        smart-routing tools for this runner session.
     :returns: Flat tool schemas for native bridges.
     """
     from omnigent.tools.builtins.agents import (
@@ -494,7 +500,10 @@ def build_native_relay_tool_schemas(spec: AgentSpec | None) -> list[_JsonObject]
     if spec is not None:
         from omnigent.tools.manager import ToolManager
 
-        for schema in ToolManager(spec).get_tool_schemas():
+        for schema in ToolManager(
+            spec,
+            smart_routing_available=smart_routing_available,
+        ).get_tool_schemas():
             function = _string_object_dict(schema.get("function"))
             if function is not None and function.get("name") in _NATIVE_RELAY_BUILTIN_TOOLS:
                 _append(function)

@@ -1715,6 +1715,7 @@ async def _auto_create_pi_terminal(
     server_client: httpx.AsyncClient | None,
     agent_spec: AgentSpec | ResolvedSpec | None = None,
     ensure_comment_relay: Callable[..., Awaitable[None]] | None = None,
+    smart_routing_available: bool = False,
 ) -> SessionResourceView:
     """
     Auto-create a Pi terminal for a pi-native session.
@@ -1728,6 +1729,8 @@ async def _auto_create_pi_terminal(
         terminal inherits the agent's ``os_env.sandbox`` rather than falling
         back to the platform default. ``None`` only when the session has no
         spec; callers must not pass ``None`` to paper over a resolution error.
+    :param smart_routing_available: Whether the owning server can execute
+        smart-routing tools for this runner session.
     :returns: Created terminal resource view.
     """
     await _cancel_auto_forwarder_task(session_id)
@@ -1777,7 +1780,10 @@ async def _auto_create_pi_terminal(
         from omnigent.runner.tool_dispatch import build_native_relay_tool_schemas
 
         spec_for_tools = _unwrap_resolved_spec(agent_spec)
-        pi_tools = build_native_relay_tool_schemas(spec_for_tools)
+        pi_tools = build_native_relay_tool_schemas(
+            spec_for_tools,
+            smart_routing_available=smart_routing_available,
+        )
     except Exception:  # noqa: BLE001 — tool registration is additive
         _logger.warning(
             "Failed to build pi-native tool schemas for session %s; "
@@ -6441,6 +6447,9 @@ async def _launch_pi(ctx: NativeLaunchContext) -> SessionResourceView:
         server_client=ctx.server_client,
         agent_spec=ctx.agent_spec,
         ensure_comment_relay=ctx.ensure_comment_relay,
+        smart_routing_available=(
+            ctx.session_init.smart_routing_available if ctx.session_init is not None else False
+        ),
     )
 
 

@@ -546,6 +546,27 @@ def test_advise_models_exposed_when_routing_enabled() -> None:
     assert "sys_advise_models" in names
 
 
+@pytest.mark.parametrize(
+    ("smart_routing_available", "expected"),
+    [(True, True), (False, False)],
+)
+def test_advise_models_follows_runner_propagated_routing_capability(
+    smart_routing_available: bool,
+    expected: bool,
+) -> None:
+    """The runner advertises routing from its server-provided capability flag."""
+    caps = _FakeRoutingCaps(routing_client=None)
+    with patch("omnigent.runtime._globals._caps", new=caps):
+        names = {
+            schema["function"]["name"]
+            for schema in ToolManager(
+                _spawn_spec(),
+                smart_routing_available=smart_routing_available,
+            ).get_tool_schemas()
+        }
+    assert ("sys_advise_models" in names) is expected
+
+
 def test_share_non_public_registers_share_tool_without_public() -> None:
     """
     ``agent_session_sharing: non-public`` alone (no spawn / declared

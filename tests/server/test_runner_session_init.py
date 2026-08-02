@@ -211,3 +211,20 @@ def test_reconnect_init_envelope_carries_fork_history_directives(db_uri: str) ->
     metadata = _claude_launch_metadata_from_envelope(envelope)
     assert metadata.fork_carry_history is True
     assert metadata.fork_source_external_id == "src-claude-sid"
+
+
+@pytest.mark.parametrize("smart_routing_available", [True, False])
+def test_init_envelope_carries_smart_routing_capability(
+    smart_routing_available: bool,
+) -> None:
+    """The server's routing capability survives the session-init boundary."""
+    payload = build_runner_session_init_payload(
+        _conversation(),
+        server_version="0.6.0.dev0",
+        smart_routing_available=smart_routing_available,
+    )
+
+    envelope = parse_runner_session_init_envelope(payload)
+
+    assert envelope is not None
+    assert envelope.smart_routing_available is smart_routing_available

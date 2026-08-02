@@ -115,6 +115,7 @@ class ToolManager:
         workdir: Path | None = None,
         sandbox_enabled: bool = True,
         os_env: OSEnvironment | None = None,
+        smart_routing_available: bool = False,
     ) -> None:
         """
         Initialize the tool manager and register built-in,
@@ -141,11 +142,14 @@ class ToolManager:
             tools use this shared instance instead of creating their
             own. ``None`` falls back to per-call creation via
             ``create_os_environment()``.
+        :param smart_routing_available: Whether the owning server can
+            execute smart-routing tools for this runner session.
         """
         self._spec = spec
         self._workdir = workdir
         self._sandbox_enabled = sandbox_enabled
         self._pre_resolved_os_env = os_env
+        self._smart_routing_available = smart_routing_available
         self._started = False
         self._tools: dict[str, Tool] = {}
         self._srt_available = is_srt_available()
@@ -486,10 +490,10 @@ class ToolManager:
         # Model awareness pairs with the dispatch grant: the per-worker
         # listing exists to pick a valid ``args.model`` for send.
         self._tools[SysListModelsTool.name()] = SysListModelsTool(spec=self._spec)
-        # Advise-models is capability-gated: expose it only when the server
-        # has a routing client configured. Hiding the tool prevents agents
-        # from probing router_on via a no-op call when routing is disabled.
-        if get_caps().routing_client is not None:
+        # Advise-models is capability-gated: expose it when routing is available
+        # in-process or was advertised by the owning server. Hiding the tool
+        # prevents agents from probing router_on when routing is disabled.
+        if get_caps().routing_client is not None or self._smart_routing_available:
             self._tools[SysAdviseModelsTool.name()] = SysAdviseModelsTool()
 
         # create: spawning OUTSIDE the declared list (existing agents

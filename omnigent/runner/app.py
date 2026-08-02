@@ -2670,6 +2670,7 @@ def create_runner_app(
                 publish_event=_publish_event,
                 server_client=server_client,
                 ensure_comment_relay=_ensure_comment_relay_started,
+                session_init=init_context.envelope,
             )
             _launch_pre: Callable[[bool], Awaitable[PreLaunchResult]] | None = None
             _launch_build: (
@@ -4837,7 +4838,13 @@ def create_runner_app(
             return
         from omnigent.runner.tool_dispatch import build_native_relay_tool_schemas
 
-        relay_schemas: list[dict[str, Any]] = build_native_relay_tool_schemas(relay_spec)
+        startup_envelope = _fresh_session_init_envelope(session_id)
+        relay_schemas: list[dict[str, Any]] = build_native_relay_tool_schemas(
+            relay_spec,
+            smart_routing_available=(
+                startup_envelope.smart_routing_available if startup_envelope is not None else False
+            ),
+        )
 
         _captured_session_id = session_id
 
@@ -5089,6 +5096,7 @@ def create_runner_app(
         if instructions:
             harness_body["instructions"] = instructions
 
+        startup_envelope = _fresh_session_init_envelope(conv)
         if conv not in _session_tool_schemas:
             all_tools: list[dict[str, Any]] = []
             if cached_spec is not None:
@@ -5100,6 +5108,11 @@ def create_runner_app(
                     _tmgr = ToolManager(
                         cached_spec,
                         workdir=cached_spec_workdir or runner_workspace,
+                        smart_routing_available=(
+                            startup_envelope.smart_routing_available
+                            if startup_envelope is not None
+                            else False
+                        ),
                     )
                     all_tools.extend(_tmgr.get_tool_schemas())
                 except (
@@ -5162,7 +5175,6 @@ def create_runner_app(
 
         await _ensure_native_terminal_for_turn(conv, harness_name)
 
-        startup_envelope = _fresh_session_init_envelope(conv)
         startup_labels = startup_envelope.snapshot.labels if startup_envelope is not None else None
 
         if harness_name == "claude-native":

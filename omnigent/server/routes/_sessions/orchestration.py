@@ -129,7 +129,10 @@ from omnigent.server.routes._sessions.common import (  # noqa: F401
 # Lower-layer helpers (SSE builders, publishers, persistence, runner-forward
 # primitives) live in _sessions.helpers.
 from omnigent.server.routes._sessions.helpers import *
-from omnigent.server.runner_session_init import RunnerSessionInitializer
+from omnigent.server.runner_session_init import (
+    RunnerSessionInitializer,
+    smart_routing_available,
+)
 from omnigent.server.schemas import (
     ChildSessionSummary,
     CreatedSessionResponse,
@@ -2919,6 +2922,7 @@ async def _ensure_runner_session_initialized(
                     conv,
                     server_version=VERSION,
                     suppress_recovery_turn=suppress_recovery_turn,
+                    smart_routing_available=smart_routing_available(),
                 ),
                 timeout=_RUNNER_SESSION_INIT_TIMEOUT_S,
             )

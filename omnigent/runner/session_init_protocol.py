@@ -43,6 +43,7 @@ class RunnerSessionInitEnvelope(BaseModel):  # type: ignore[explicit-any]  # Pyd
     agent_id: str
     sub_agent_name: str | None = None
     snapshot: RunnerSessionInitSnapshot
+    smart_routing_available: bool = False
     # When True the runner must skip crash-recovery turn detection on this
     # create_session call.  Set by the server whenever it calls session-init
     # immediately before forwarding a message — the forward carries the
@@ -56,6 +57,7 @@ def build_runner_session_init_payload(
     *,
     server_version: str,
     suppress_recovery_turn: bool = False,
+    smart_routing_available: bool = False,
 ) -> dict[str, object]:
     """Build the versioned initialization fields appended to the legacy body."""
     if conversation.agent_id is None:
@@ -67,6 +69,7 @@ def build_runner_session_init_payload(
         agent_id=conversation.agent_id,
         sub_agent_name=conversation.sub_agent_name,
         suppress_recovery_turn=suppress_recovery_turn,
+        smart_routing_available=smart_routing_available,
         snapshot=RunnerSessionInitSnapshot(
             created_at=conversation.created_at,
             updated_at=conversation.updated_at,
