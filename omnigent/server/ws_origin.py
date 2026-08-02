@@ -56,6 +56,7 @@ __all__ = [
     "WebSocketOriginMiddleware",
     "origin_allowed",
     "origin_hostname_is_loopback",
+    "origin_matches_scope",
     "parse_allowed_origins",
 ]
 
@@ -99,6 +100,54 @@ def origin_hostname_is_loopback(origin: str) -> bool:
     return addr.is_loopback or (mapped_ipv4 is not None and mapped_ipv4.is_loopback)
 
 
+def origin_matches_scope(origin: str | None, scope: Scope) -> bool:
+    """Return whether an Origin is the exact HTTP origin of an ASGI request.
+
+    A mobile WebView can load a local server through a non-loopback address
+    such as Android emulator host ``10.0.2.2``. That is still same-origin
+    traffic, so it is safe in local mode. The comparison normalizes default
+    ports and maps WebSocket schemes to their corresponding HTTP origin scheme.
+
+    :param origin: Raw ``Origin`` header, or ``None`` when absent.
+    :param scope: ASGI HTTP or WebSocket connection scope.
+    :returns: ``True`` only when the Origin exactly identifies this request's
+        scheme, host, and effective port.
+    """
+    if origin is None:
+        return False
+    scheme = scope.get("scheme")
+    if scheme == "ws":
+        scheme = "http"
+    elif scheme == "wss":
+        scheme = "https"
+    host = _header_from_scope(scope, b"host")
+    if not isinstance(scheme, str) or host is None:
+        return False
+    return _normalized_http_origin(origin) == _normalized_http_origin(f"{scheme}://{host}")
+
+
+def _normalized_http_origin(value: str) -> tuple[str, str, int] | None:
+    """Parse an HTTP(S) origin into comparable scheme, host, and port values."""
+    try:
+        parsed = urlsplit(value)
+        if (
+            parsed.scheme not in {"http", "https"}
+            or parsed.hostname is None
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.path not in {"", "/"}
+            or parsed.query
+            or parsed.fragment
+        ):
+            return None
+        port = parsed.port
+    except ValueError:
+        return None
+    if port is None:
+        port = 443 if parsed.scheme == "https" else 80
+    return parsed.scheme, parsed.hostname, port
+
+
 def parse_allowed_origins() -> frozenset[str]:
     """Read the optional explicit origin allowlist from the environment.
 
@@ -135,8 +184,8 @@ def origin_allowed(
       so page JS cannot strip or forge it), so its absence is not a
       browser CSRF / CSWSH vector.
     - In ``local_mode`` an ``Origin`` is allowed only when its hostname is
-      a loopback host — this is the CSRF / CSWSH guard for the
-      unauthenticated single-user local server.
+      a loopback host. Callers separately allow exact request-origin matches,
+      which safely supports a mobile client connected through a LAN address.
     - In non-local modes the connection is authenticated by cookie / proxy
       header, so any ``Origin`` is allowed unless ``extra_allowed`` is
       non-empty, in which case only the allowlist (matched above) passes.
@@ -176,9 +225,14 @@ def _origin_from_scope(scope: Scope) -> str | None:
     # Annotate the ASGI headers explicitly: ``Scope`` values are typed
     # ``Any``, so without this mypy infers ``value`` as ``Any`` and flags
     # the ``value.decode(...)`` return as an Any-return.
+    return _header_from_scope(scope, b"origin")
+
+
+def _header_from_scope(scope: Scope, name: bytes) -> str | None:
+    """Extract a decoded header from an ASGI connection scope."""
     headers: Iterable[tuple[bytes, bytes]] = scope.get("headers", [])
     for key, value in headers:
-        if key == b"origin":
+        if key == name:
             return value.decode("latin-1")
     return None
 
@@ -220,7 +274,7 @@ class WebSocketOriginMiddleware:
             return
 
         origin = _origin_from_scope(scope)
-        if origin_allowed(
+        if origin_matches_scope(origin, scope) or origin_allowed(
             origin,
             local_mode=local_single_user_enabled(),
             extra_allowed=parse_allowed_origins(),

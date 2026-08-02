@@ -64,7 +64,12 @@ def _clean_origin_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv(_ALLOWLIST_ENV, raising=False)
 
 
-def _request_with_origin(origin: str | None) -> Request:
+def _request_with_origin(
+    origin: str | None,
+    *,
+    host: str = "localhost:8000",
+    scheme: str = "http",
+) -> Request:
     """
     Build a real Starlette ``Request`` carrying (or omitting) an Origin.
 
@@ -74,10 +79,10 @@ def _request_with_origin(origin: str | None) -> Request:
     :returns: A real :class:`starlette.requests.Request` whose only
         meaningful state is its header set.
     """
-    raw_headers: list[tuple[bytes, bytes]] = []
+    raw_headers: list[tuple[bytes, bytes]] = [(b"host", host.encode("latin-1"))]
     if origin is not None:
         raw_headers.append((b"origin", origin.encode("latin-1")))
-    return Request({"type": "http", "method": "POST", "headers": raw_headers})
+    return Request({"type": "http", "method": "POST", "scheme": scheme, "headers": raw_headers})
 
 
 @pytest.mark.parametrize("local_mode", [True, False])
@@ -107,6 +112,20 @@ def test_loopback_origin_is_allowed_in_local_mode(monkeypatch: pytest.MonkeyPatc
     """
     monkeypatch.setenv(_LOCAL_ENV, "1")
     assert require_trusted_origin(_request_with_origin("http://localhost:8000")) is None
+
+
+def test_mobile_same_origin_is_allowed_in_local_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A mobile WebView may use a non-loopback address for the local server.
+
+    Android's emulator reaches the host through ``10.0.2.2``. Its WebView
+    loads the Omnigent server directly, so its Origin exactly matches the
+    request target and is not a cross-site CSRF request.
+    """
+    monkeypatch.setenv(_LOCAL_ENV, "1")
+    assert (
+        require_trusted_origin(_request_with_origin("http://10.0.2.2:8000", host="10.0.2.2:8000"))
+        is None
+    )
 
 
 def test_cross_origin_is_rejected_in_local_mode(monkeypatch: pytest.MonkeyPatch) -> None:

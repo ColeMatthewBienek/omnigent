@@ -27,6 +27,7 @@ from omnigent.server.ws_origin import (
     WebSocketOriginMiddleware,
     origin_allowed,
     origin_hostname_is_loopback,
+    origin_matches_scope,
     parse_allowed_origins,
 )
 
@@ -85,6 +86,43 @@ def test_origin_hostname_is_loopback(origin: str, expected: bool) -> None:
     :returns: None.
     """
     assert origin_hostname_is_loopback(origin) is expected
+
+
+@pytest.mark.parametrize(
+    "origin,scope,expected",
+    [
+        (
+            "http://10.0.2.2:8000",
+            {
+                "type": "http",
+                "scheme": "http",
+                "headers": [(b"host", b"10.0.2.2:8000")],
+            },
+            True,
+        ),
+        (
+            "https://server.example.com",
+            {
+                "type": "websocket",
+                "scheme": "wss",
+                "headers": [(b"host", b"server.example.com:443")],
+            },
+            True,
+        ),
+        (
+            "https://evil.example.com",
+            {
+                "type": "http",
+                "scheme": "https",
+                "headers": [(b"host", b"server.example.com")],
+            },
+            False,
+        ),
+    ],
+)
+def test_origin_matches_scope(origin: str, scope: dict[str, Any], expected: bool) -> None:
+    """Only the exact request target is same-origin, including mobile hosts."""
+    assert origin_matches_scope(origin, scope) is expected
 
 
 # --------------------------------------------------------------------------
@@ -223,10 +261,10 @@ def _ws_scope(origin: str | None) -> dict[str, Any]:
     :param origin: Origin header value to include, or ``None`` to omit.
     :returns: An ASGI scope dict with ``type == "websocket"``.
     """
-    headers: list[tuple[bytes, bytes]] = []
+    headers: list[tuple[bytes, bytes]] = [(b"host", b"localhost:8000")]
     if origin is not None:
         headers.append((b"origin", origin.encode("latin-1")))
-    return {"type": "websocket", "headers": headers}
+    return {"type": "websocket", "scheme": "ws", "headers": headers}
 
 
 async def _drive_middleware(
