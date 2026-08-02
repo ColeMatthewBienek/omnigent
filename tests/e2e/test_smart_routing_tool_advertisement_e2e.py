@@ -2,11 +2,12 @@
 
 Starts real server and runner subprocesses, uploads a spawn-capable agent,
 drives one mock-LLM turn, and inspects the tool schemas received by the model.
-The two parameter rows differ only in whether the server has an ``llm:`` block.
+The parameter rows cover routing enabled/disabled and bundled-child creation.
 """
 
 from __future__ import annotations
 
+import json
 import os
 import secrets
 import signal
@@ -33,6 +34,7 @@ from tests._helpers.compat import (
     server_executable,
 )
 from tests.e2e.conftest import (
+    build_agent_bundle,
     configure_mock_llm,
     create_runner_bound_session,
     find_free_port,
@@ -187,14 +189,15 @@ def _advertised_tool_names(request_body: dict[str, object]) -> set[str]:
 
 @pytest.mark.flaky(reruns=2, reruns_delay=5)
 @pytest.mark.parametrize(
-    "smart_routing_available",
-    [True, False],
-    ids=["routing-configured", "routing-disabled"],
+    ("smart_routing_available", "bundled_child"),
+    [(True, False), (False, False), (True, True)],
+    ids=["routing-configured", "routing-disabled", "routing-configured-bundled-child"],
 )
 def test_runner_advertises_advise_models_only_when_server_can_route(
     tmp_path: Path,
     mock_llm_server_url: str,
     smart_routing_available: bool,
+    bundled_child: bool,
 ) -> None:
     """The model sees ``sys_advise_models`` exactly when the server can route."""
     if compat_server_python() is not None or compat_runner_python() is not None:
@@ -232,6 +235,43 @@ def test_runner_advertises_advise_models_only_when_server_can_route(
                 agent_name=agent_name,
                 runner_id=runner_id,
             )
+            if bundled_child:
+                child_agent_dir = tmp_path / "bundled-child-agent"
+                child_agent_dir.mkdir()
+                (child_agent_dir / "config.yaml").write_text(
+                    yaml.safe_dump(
+                        {
+                            "spec_version": 1,
+                            "name": f"bundled-routing-tools-{uuid.uuid4().hex[:8]}",
+                            "prompt": "Reply briefly without calling tools.",
+                            "spawn": True,
+                            "executor": {
+                                "type": "omnigent",
+                                "config": {"harness": "openai-agents"},
+                            },
+                            "llm": {
+                                "model": model,
+                                "connection": {
+                                    "api_key": "mock-key",
+                                    "base_url": f"{mock_llm_server_url}/v1",
+                                },
+                            },
+                        }
+                    )
+                )
+                child_response = client.post(
+                    "/v1/sessions",
+                    data={"metadata": json.dumps({"parent_session_id": session_id})},
+                    files={
+                        "bundle": (
+                            "agent.tar.gz",
+                            build_agent_bundle(child_agent_dir),
+                            "application/gzip",
+                        )
+                    },
+                )
+                assert child_response.status_code == 201, child_response.text
+                session_id = str(child_response.json()["session_id"])
             response_id = send_user_message_to_session(
                 client,
                 session_id=session_id,

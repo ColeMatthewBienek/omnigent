@@ -530,8 +530,8 @@ def register_core_routes(
         if inherited_runner_id is not None:
             await _notify_runner_of_bundled_child(
                 result.session_id,
-                result.agent_id,
                 runner_router,
+                conversation_store,
             )
         return result
 

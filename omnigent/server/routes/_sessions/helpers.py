@@ -66,6 +66,7 @@ from omnigent.runner.identity import (
     token_bound_runner_id,
 )
 from omnigent.runner.routing import RunnerRouter
+from omnigent.runner.session_init_protocol import build_runner_session_init_payload
 from omnigent.runner.transports.ws_tunnel.registry import TunnelRegistry
 from omnigent.runtime import (
     get_policy_store,
@@ -124,6 +125,7 @@ from omnigent.server.routes._sessions.common import (  # noqa: F401
     set_server_runner_router,
     user_session_stream,
 )
+from omnigent.server.runner_session_init import smart_routing_available
 from omnigent.server.schemas import (
     ChildSessionSummary,
     CompletedEvent,
@@ -184,6 +186,7 @@ from omnigent.stores.conversation_store import (
 )
 from omnigent.stores.host_store import Host, HostStore
 from omnigent.stores.permission_store import PermissionStore
+from omnigent.version import VERSION
 
 
 def _codex_plan_mode_enabled(mode: str) -> bool:
@@ -7791,8 +7794,8 @@ async def _authorize_bundled_parent_and_inherit_runner(
 
 async def _notify_runner_of_bundled_child(
     session_id: str,
-    agent_id: str,
     runner_router: RunnerRouter | None,
+    conversation_store: ConversationStore,
 ) -> None:
     """
     Notify the inherited runner that a bundled child session exists.
@@ -7803,23 +7806,33 @@ async def _notify_runner_of_bundled_child(
     swallowed — the notify is additive and must not fail the create.
 
     :param session_id: The new child session id, e.g. ``"conv_abc123"``.
-    :param agent_id: The child's session-scoped agent id,
-        e.g. ``"ag_abc123"``.
     :param runner_router: Router used to resolve the bound runner's
         client; ``None`` falls back to the in-process runner.
+    :param conversation_store: Store used to load the newly created
+        child for the versioned initialization envelope.
     :returns: None.
     """
     runner_client = await _get_runner_client(session_id, runner_router)
     if runner_client is None:
         return
+    conversation = await asyncio.to_thread(
+        conversation_store.get_conversation,
+        session_id,
+    )
+    if conversation is None:
+        _logger.warning(
+            "Failed to notify runner about missing bundled session %s",
+            session_id,
+        )
+        return
     try:
         await runner_client.post(
             "/v1/sessions",
-            json={
-                "session_id": session_id,
-                "agent_id": agent_id,
-                "sub_agent_name": None,
-            },
+            json=build_runner_session_init_payload(
+                conversation,
+                server_version=VERSION,
+                smart_routing_available=smart_routing_available(),
+            ),
             timeout=10.0,
         )
     except (httpx.HTTPError, ConnectionError):
