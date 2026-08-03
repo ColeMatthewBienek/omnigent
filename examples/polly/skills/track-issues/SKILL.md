@@ -14,6 +14,8 @@ closes issues.
 ## Invocation
 
 `/track-issues <owner>/<repo>` — set up tracking for that repo.
+`/track-issues <owner>/<repo> --project <name>` — same, but file each
+scheduled run's session into the named Omnigent project (UI grouping).
 `/track-issues remove <owner>/<repo>` — pause/delete the schedule.
 
 Requirements before setup: the repo must have a local clone on this host
@@ -42,7 +44,14 @@ can amend and requeue.
    - `timezone`: the host's local timezone
    - `workspace`: the local clone path; `host_id`: from step 3
    - `prompt`: the sweep prompt below, with `<repo>` substituted.
-5. Report the schedule id and first-fire time to the human.
+   - `project_id` (optional): if the human passed `--project <name>` — or an
+     Omnigent project named exactly like the repo short name exists — resolve
+     the project's id and pass it so every run's session files into that
+     project. If the server rejects the field (older build without
+     scheduled-task project filing), retry the create without it and tell the
+     human the server needs updating for project filing.
+5. Report the schedule id, first-fire time, and (if set) the project the
+   runs will file into.
 
 ## The sweep prompt (template for each scheduled run)
 
