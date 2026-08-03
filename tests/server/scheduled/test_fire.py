@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 import pytest
@@ -79,7 +79,14 @@ class FakeScheduledTaskStore:
     def update(self, scheduled_task_id: str, **kwargs: Any) -> ScheduledTask | None:
         self.update_workspace_ids.append(current_workspace_id())
         self.updates.append({"id": scheduled_task_id, **kwargs})
-        return self._rows.get(scheduled_task_id)
+        row = self._rows.get(scheduled_task_id)
+        if row is not None:
+            # Actually apply the kwargs (unlike a bare recording stub) so a
+            # subsequent get() in the SAME test observes the write — needed
+            # for heal-on-fire tests that re-fire after a persisted heal.
+            row = replace(row, **kwargs)
+            self._rows[scheduled_task_id] = row
+        return row
 
     def create_run(
         self, run_id: str, scheduled_task_id: str, status: str, scheduled_at: int, **kwargs: Any
@@ -479,6 +486,19 @@ async def test_fire_files_session_into_project_survives_auth_mode_change(
     Before persisting ``project_owner``, re-resolving at fire time from a
     flipped mode would look the project up under the wrong scope and treat a
     still-valid project as vanished.
+
+    Unit-boundary choice: this exercises ``build_on_fire`` directly against a
+    manually constructed row/``FireDeps.local_single_user`` flip rather than
+    a full create-through-app-A / restart / fire-through-app-B flow. The
+    route-level ``test_create_with_project_id_across_owner_modes`` /
+    ``test_update_with_project_id_across_owner_modes`` already cover real
+    create/update through each mode's actual app end-to-end; a true two-app
+    restart flow would additionally need to spin up and tear down two
+    separate ``create_app`` instances (with different ``auth_provider``s)
+    sharing one ``db_uri`` and both entering/exiting the ASGI lifespan, which
+    buys no more coverage of ``resolve_project_owner`` /
+    ``decode_scheduled_task_project_owner`` — the actual logic under test —
+    than flipping the flag here does.
     """
     created_owner = RESERVED_USER_LOCAL if created_local_single_user else None
     fired_local_single_user = not created_local_single_user
@@ -516,6 +536,75 @@ async def test_fire_files_session_into_project_survives_auth_mode_change(
 
     assert project_store.gets == [("proj_1", created_owner)]
     assert conv_store.filed == [("conv_1", "proj_1")]
+
+
+@pytest.mark.asyncio
+async def test_fire_heals_legacy_project_owner_and_survives_later_mode_switch() -> None:
+    """Heal-on-fire: a legacy row (``project_owner`` NULL) has its owner
+    resolved under the CURRENT mode on this fire; since the lookup succeeds,
+    that resolution is persisted back onto the row. A LATER fire — even one
+    that runs after the server's auth mode changes — must still file
+    correctly, because it reads the now-healed ``project_owner`` directly
+    instead of taking the (now wrong) live fallback again.
+
+    Without the heal, the second fire below would re-derive
+    ``resolve_project_owner(None, local_single_user=False)`` == ``None`` and
+    look "proj_1" up under the wrong owner, soft-failing as vanished.
+    """
+    perm = FakePermissionStore()
+    conv_store = FakeConversationStore()
+    project_store = FakeProjectStore(existing={"proj_1": RESERVED_USER_LOCAL})
+    store = FakeScheduledTaskStore(
+        rows={"task_1": _task(project_id="proj_1", user_id=None, project_owner=None)}
+    )
+
+    async def _launch(conv: Any, task: Any) -> None:
+        return None
+
+    # First fire: server is in local-single-user mode. The legacy row falls
+    # back to resolve_project_owner(None, local_single_user=True) ==
+    # RESERVED_USER_LOCAL, the lookup succeeds, and the heal persists it.
+    on_fire_before_switch = build_on_fire(
+        _deps(
+            store,
+            permission_store=perm,
+            conversation_store=conv_store,
+            project_store=project_store,
+            local_single_user=True,
+        ),
+        launch_dispatch=_launch,
+    )
+    await on_fire_before_switch(0, "task_1")
+    await _drain()
+
+    assert conv_store.filed == [("conv_1", "proj_1")]
+    heal_writes = [u for u in store.updates if "project_owner" in u]
+    assert heal_writes == [{"id": "task_1", "project_owner": RESERVED_USER_LOCAL}]
+
+    # Second fire: simulate a restart that flips the server INTO
+    # auth-disabled mode. The row is no longer legacy (project_owner was
+    # healed to RESERVED_USER_LOCAL above), so decode returns it verbatim
+    # regardless of the new mode.
+    on_fire_after_switch = build_on_fire(
+        _deps(
+            store,
+            permission_store=perm,
+            conversation_store=conv_store,
+            project_store=project_store,
+            local_single_user=False,
+        ),
+        launch_dispatch=_launch,
+    )
+    await on_fire_after_switch(0, "task_1")
+    await _drain()
+
+    assert project_store.gets == [
+        ("proj_1", RESERVED_USER_LOCAL),
+        ("proj_1", RESERVED_USER_LOCAL),
+    ]
+    assert conv_store.filed == [("conv_1", "proj_1"), ("conv_2", "proj_1")]
+    # No second heal write — the row was healed only once, on the first fire.
+    assert len([u for u in store.updates if "project_owner" in u]) == 1
 
 
 @pytest.mark.asyncio

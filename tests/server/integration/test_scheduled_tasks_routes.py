@@ -305,6 +305,44 @@ async def test_update_rejects_nonexistent_project_id(
     assert resp.status_code == 404, resp.text
 
 
+async def test_update_heals_legacy_project_owner_on_unrelated_patch(
+    auth_client: httpx.AsyncClient, db_uri: str
+) -> None:
+    """Heal-on-update: a legacy row (``project_id`` set directly at the store
+    layer, before ``project_owner`` existed — ``project_owner`` stays NULL)
+    gets its owner resolved and persisted on ANY successful PATCH, even one
+    that touches only unrelated fields (here: a rename). Without this, a
+    legacy row would stay mode-dependent forever, since only a PATCH that
+    itself sets ``project_id`` would otherwise ever write ``project_owner``.
+    """
+    _make_user(db_uri)
+    project_id = await _create_project(auth_client, "legacy target")
+    created = (
+        await auth_client.post("/v1/scheduled-tasks", json=_create_body(), headers=_headers())
+    ).json()
+
+    # Simulate a legacy row: project_id set directly at the store layer
+    # (bypassing the route, which always pairs it with project_owner), so
+    # project_owner stays NULL exactly like a row written before that column
+    # existed.
+    legacy_store = SqlAlchemyScheduledTaskStore(db_uri)
+    legacy_store.update(created["id"], project_id=project_id)
+    assert legacy_store.get(created["id"]).project_owner is None  # type: ignore[union-attr]
+
+    resp = await auth_client.patch(
+        f"/v1/scheduled-tasks/{created['id']}",
+        json={"name": "renamed"},
+        headers=_headers(),
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["name"] == "renamed"
+
+    healed = legacy_store.get(created["id"])
+    assert healed is not None
+    assert healed.project_id == project_id
+    assert healed.project_owner == "alice@example.com"
+
+
 # ── project_id across all three owner conventions ───────────────────────────
 #
 # Real deployments run in exactly one of three modes:

@@ -544,6 +544,18 @@ def create_scheduled_tasks_router(
             fields["project_owner"] = await _validate_project_id_or_404(
                 fields["project_id"], owner=owner_id
             )
+        elif existing.project_id is not None and existing.project_owner is None:
+            # Heal-on-update: a legacy row (project_id set, project_owner
+            # never persisted — predates this column) gets its owner resolved
+            # under the CURRENT mode and persisted on ANY successful PATCH,
+            # not just one that touches project_id. Without this, a rename or
+            # RRULE-only PATCH would leave the row mode-dependent forever
+            # (see decode_scheduled_task_project_owner's fallback). Current-
+            # mode resolution is the best available for legacy data — the
+            # same accepted, bounded assumption the fallback itself makes.
+            fields["project_owner"] = encode_scheduled_task_project_owner(
+                resolve_project_owner(owner_id, local_single_user=_local_single_user)
+            )
         if {"model_override", "reasoning_effort"}.intersection(fields):
             model_override, reasoning_effort = validate_session_model_metadata(
                 model_override=fields.get("model_override", existing.model_override),

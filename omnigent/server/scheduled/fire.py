@@ -59,6 +59,7 @@ from omnigent.server.auth import (
     LEVEL_OWNER,
     RESERVED_USER_LOCAL,
     decode_scheduled_task_project_owner,
+    encode_scheduled_task_project_owner,
 )
 from omnigent.server.routes._session_create_validation import (
     validate_existing_host_workspace,
@@ -643,6 +644,13 @@ async def _file_into_project(deps: FireDeps, task: ScheduledTask, conversation_i
     never break the scheduled run. Missing ``project_store`` (feature not
     configured) and a vanished project id both log and leave the session
     unfiled; only an unset ``task.project_id`` is a silent no-op.
+
+    Heal-on-fire: a legacy row (``project_owner`` NULL — predates that
+    column) falls back to live current-mode resolution; when that succeeds,
+    the resolved owner is persisted back onto the row so the live fallback
+    happens at most once per legacy row (bounded by the next auth-mode
+    change or an update-time heal — see ``routes/scheduled_tasks.py``'s
+    heal-on-update).
     """
     if task.project_id is None:
         return
@@ -666,6 +674,7 @@ async def _file_into_project(deps: FireDeps, task: ScheduledTask, conversation_i
         # only falls back to that live re-resolution for a legacy row that
         # predates this column (project_owner is NULL) — see its docstring
         # for the accepted limitation that applies to that gap only.
+        is_legacy_row = task.project_owner is None
         project_owner = decode_scheduled_task_project_owner(
             task.project_owner,
             user_id=task.user_id,
@@ -682,6 +691,17 @@ async def _file_into_project(deps: FireDeps, task: ScheduledTask, conversation_i
                 conversation_id,
             )
             return
+        if is_legacy_row:
+            # Heal-on-fire: this fire took the legacy NULL fallback above and
+            # the lookup succeeded, so the CURRENT mode's resolution is
+            # confirmed correct for this row right now — persist it so the
+            # fallback (and its live re-resolution) is not repeated on every
+            # future fire, only up to the next auth-mode change or heal.
+            await asyncio.to_thread(
+                deps.scheduled_task_store.update,
+                task.id,
+                project_owner=encode_scheduled_task_project_owner(project_owner),
+            )
         filed = await asyncio.to_thread(
             deps.conversation_store.set_conversation_project, conversation_id, task.project_id
         )
