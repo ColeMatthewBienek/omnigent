@@ -695,6 +695,99 @@ def test_update_clearing_already_null_field_is_noop_for_updated_at(
     assert result.updated_at is None
 
 
+# ── project_id: file a task's fired sessions into a project ─────────────────
+
+
+def test_create_with_project_id(store: SqlAlchemyScheduledTaskStore) -> None:
+    """``create`` persists a ``project_id`` and round-trips it."""
+    task = store.create(
+        scheduled_task_id=_uid("st_proj_create"),
+        name="n",
+        prompt="p",
+        rrule="FREQ=MINUTELY",
+        user_id="u",
+        agent_id=_uid("ag"),
+        timezone="UTC",
+        project_id=_uid("proj_1"),
+    )
+    assert task.project_id == _uid("proj_1")
+    fetched = store.get(_uid("st_proj_create"))
+    assert fetched is not None
+    assert fetched.project_id == _uid("proj_1")
+
+
+def test_create_without_project_id_defaults_to_none(store: SqlAlchemyScheduledTaskStore) -> None:
+    """``create`` with no ``project_id`` leaves fired sessions unfiled."""
+    task = store.create(
+        scheduled_task_id=_uid("st_proj_default"),
+        name="n",
+        prompt="p",
+        rrule="FREQ=MINUTELY",
+        user_id="u",
+        agent_id=_uid("ag"),
+        timezone="UTC",
+    )
+    assert task.project_id is None
+
+
+def test_update_sets_project_id(store: SqlAlchemyScheduledTaskStore) -> None:
+    """``update(project_id=...)`` files a previously-unfiled task."""
+    store.create(
+        scheduled_task_id=_uid("st_proj_set"),
+        name="n",
+        prompt="p",
+        rrule="FREQ=MINUTELY",
+        user_id="u",
+        agent_id=_uid("ag"),
+        timezone="UTC",
+    )
+    updated = store.update(_uid("st_proj_set"), project_id=_uid("proj_2"))
+    assert updated is not None
+    assert updated.project_id == _uid("proj_2")
+    fetched = store.get(_uid("st_proj_set"))
+    assert fetched is not None
+    assert fetched.project_id == _uid("proj_2")
+
+
+def test_update_clears_project_id_to_null(store: SqlAlchemyScheduledTaskStore) -> None:
+    """Passing ``project_id=None`` explicitly unfiles the task."""
+    store.create(
+        scheduled_task_id=_uid("st_proj_clear"),
+        name="n",
+        prompt="p",
+        rrule="FREQ=MINUTELY",
+        user_id="u",
+        agent_id=_uid("ag"),
+        timezone="UTC",
+        project_id=_uid("proj_3"),
+    )
+    updated = store.update(_uid("st_proj_clear"), project_id=None)
+    assert updated is not None
+    assert updated.project_id is None
+    fetched = store.get(_uid("st_proj_clear"))
+    assert fetched is not None
+    assert fetched.project_id is None
+
+
+def test_update_omitting_project_id_leaves_it_unchanged(
+    store: SqlAlchemyScheduledTaskStore,
+) -> None:
+    """Omitting ``project_id`` on update does not touch the column."""
+    store.create(
+        scheduled_task_id=_uid("st_proj_omit"),
+        name="n",
+        prompt="p",
+        rrule="FREQ=MINUTELY",
+        user_id="u",
+        agent_id=_uid("ag"),
+        timezone="UTC",
+        project_id=_uid("proj_4"),
+    )
+    updated = store.update(_uid("st_proj_omit"), name="new_name")
+    assert updated is not None
+    assert updated.project_id == _uid("proj_4")
+
+
 # ── delete: cascade cleanup of runs (Finding 2) ──────────────────────────────
 
 

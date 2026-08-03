@@ -1484,6 +1484,11 @@ class SqlScheduledTask(OmnigentBase):
     last_run_conversation_id: Mapped[str | None] = mapped_column(Uuid16, nullable=True)
     created_at: Mapped[int] = mapped_column(Integer)
     updated_at: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # First-class project a fired session is filed into (relates to
+    # projects.id; no DB foreign key, Rule R032). None = fired sessions are
+    # left unfiled. A vanished project is soft-failed at fire time, not
+    # enforced here.
+    project_id: Mapped[str | None] = mapped_column(Uuid16, nullable=True)
 
     __table_args__ = (
         CheckConstraint("state IN (1, 2, 3)", name="ck_scheduled_tasks_state"),

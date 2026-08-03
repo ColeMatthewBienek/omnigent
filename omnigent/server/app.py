@@ -1082,6 +1082,7 @@ def create_app(
                 tunnel_registry=tunnel_registry,
                 file_store=file_store,
                 artifact_store=artifact_store,
+                project_store=project_store,
             )
             on_fire = build_on_fire(fire_deps)
             # The manual "run now" trigger reuses the same fire path (dispatch /
@@ -2028,6 +2029,7 @@ def create_app(
                 permission_store=permission_store,
                 agent_cache=agent_cache,
                 auth_provider=auth_provider,
+                project_store=project_store,
             ),
             prefix="/v1",
             tags=["scheduled_tasks"],

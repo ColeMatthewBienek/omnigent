@@ -53,6 +53,7 @@ class ScheduledTaskStore(ABC):
         workspace: str | None = None,
         host_id: str | None = None,
         state: str = "active",
+        project_id: str | None = None,
     ) -> ScheduledTask:
         """
         Insert a new scheduled task.
@@ -72,6 +73,8 @@ class ScheduledTaskStore(ABC):
         :param host_id: The connected host to pin the run to.
         :param state: Lifecycle state — ``active``/``paused``/``deleted``.
             Defaults to ``"active"``.
+        :param project_id: First-class project to file each fired session into.
+            ``None`` (the default) leaves fired sessions unfiled.
         :returns: The newly created :class:`ScheduledTask`.
         :raises ValueError: If ``state`` is not a recognized value.
         """
@@ -136,15 +139,17 @@ class ScheduledTaskStore(ABC):
         state: str | None = None,
         last_run_at: int | None = None,
         last_run_conversation_id: str | None = _UNSET,
+        project_id: str | None = _UNSET,
     ) -> ScheduledTask | None:
         """
         Update mutable fields of a task.
 
-        Most parameters use ``None`` to mean "leave unchanged". For ``host_id``
-        and ``last_run_conversation_id``, the sentinel default means "not
-        provided / leave unchanged"; passing ``None`` explicitly sets the column
-        to NULL (e.g. to clear a host binding or to null out the last-run
-        conversation after it is deleted).
+        Most parameters use ``None`` to mean "leave unchanged". For
+        ``host_id``, ``last_run_conversation_id``, and ``project_id``, the
+        sentinel default means "not provided / leave unchanged"; passing
+        ``None`` explicitly sets the column to NULL (e.g. to clear a host
+        binding, to null out the last-run conversation after it is deleted, or
+        to unfile a task's fired sessions from its project).
 
         Passing ``rrule`` updates the recurring trigger; ``None``
         leaves it unchanged.

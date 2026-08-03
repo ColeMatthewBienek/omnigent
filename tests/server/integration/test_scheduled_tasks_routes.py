@@ -25,6 +25,7 @@ from omnigent.stores.artifact_store.local import LocalArtifactStore
 from omnigent.stores.conversation_store.sqlalchemy_store import SqlAlchemyConversationStore
 from omnigent.stores.file_store.sqlalchemy_store import SqlAlchemyFileStore
 from omnigent.stores.permission_store.sqlalchemy_store import SqlAlchemyPermissionStore
+from omnigent.stores.project_store.sqlalchemy_store import SqlAlchemyProjectStore
 from omnigent.stores.scheduled_task_store.sqlalchemy_store import (
     SqlAlchemyScheduledTaskStore,
 )
@@ -71,6 +72,9 @@ def auth_app(runtime_init: None, db_uri: str, tmp_path: Path) -> FastAPI:
         # ownership) resolves against actual host rows. Without it,
         # ``app.state.host_store`` is None and the route skips the check.
         host_store=HostStore(db_uri),
+        # A real project store so project_id validation (existence + ownership)
+        # resolves against actual project rows.
+        project_store=SqlAlchemyProjectStore(db_uri),
         auth_provider=UnifiedAuthProvider(source="header"),
     )
 
@@ -157,6 +161,147 @@ async def test_create_lists_and_gets(auth_client: httpx.AsyncClient, db_uri: str
     got = await auth_client.get(f"/v1/scheduled-tasks/{task_id}", headers=_headers())
     assert got.status_code == 200
     assert got.json()["id"] == task_id
+
+
+async def _create_project(
+    auth_client: httpx.AsyncClient, name: str, *, headers: dict[str, str] | None = None
+) -> str:
+    """Create a project via the projects API and return its id."""
+    resp = await auth_client.post(
+        "/v1/projects", json={"name": name}, headers=headers or _headers()
+    )
+    assert resp.status_code == 200, resp.text
+    return str(resp.json()["id"])
+
+
+async def test_create_with_project_id_files_the_task(
+    auth_client: httpx.AsyncClient, db_uri: str
+) -> None:
+    """Creating with a ``project_id`` the caller owns persists it."""
+    _make_user(db_uri)
+    project_id = await _create_project(auth_client, "nightly work")
+    resp = await auth_client.post(
+        "/v1/scheduled-tasks",
+        json=_create_body(project_id=project_id),
+        headers=_headers(),
+    )
+    assert resp.status_code == 200, resp.text
+    created = resp.json()
+    assert created["project_id"] == project_id
+    task_id = created["id"]
+
+    got = await auth_client.get(f"/v1/scheduled-tasks/{task_id}", headers=_headers())
+    assert got.status_code == 200
+    assert got.json()["project_id"] == project_id
+
+
+async def test_create_rejects_nonexistent_project_id(
+    auth_client: httpx.AsyncClient, db_uri: str
+) -> None:
+    """A ``project_id`` that does not exist is rejected loudly at create time."""
+    _make_user(db_uri)
+    resp = await auth_client.post(
+        "/v1/scheduled-tasks",
+        json=_create_body(project_id="00000000000000000000000000000000"),
+        headers=_headers(),
+    )
+    assert resp.status_code == 404, resp.text
+
+
+async def test_create_rejects_another_owners_project_id(
+    auth_client: httpx.AsyncClient, db_uri: str
+) -> None:
+    """A ``project_id`` owned by a different user is rejected as not found."""
+    _make_user(db_uri)
+    _make_user(db_uri, "bob@example.com")
+    bobs_project = await _create_project(
+        auth_client, "bob's project", headers=_headers("bob@example.com")
+    )
+    resp = await auth_client.post(
+        "/v1/scheduled-tasks",
+        json=_create_body(project_id=bobs_project),
+        headers=_headers("alice@example.com"),
+    )
+    assert resp.status_code == 404, resp.text
+
+
+async def test_update_sets_project_id(auth_client: httpx.AsyncClient, db_uri: str) -> None:
+    """PATCH can file a previously-unfiled task into a project the caller owns."""
+    _make_user(db_uri)
+    created = (
+        await auth_client.post("/v1/scheduled-tasks", json=_create_body(), headers=_headers())
+    ).json()
+    project_id = await _create_project(auth_client, "later work")
+
+    resp = await auth_client.patch(
+        f"/v1/scheduled-tasks/{created['id']}",
+        json={"project_id": project_id},
+        headers=_headers(),
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["project_id"] == project_id
+
+
+async def test_update_clears_project_id(auth_client: httpx.AsyncClient, db_uri: str) -> None:
+    """PATCH with an explicit ``project_id: null`` unfiles the task."""
+    _make_user(db_uri)
+    project_id = await _create_project(auth_client, "to be cleared")
+    created = (
+        await auth_client.post(
+            "/v1/scheduled-tasks",
+            json=_create_body(project_id=project_id),
+            headers=_headers(),
+        )
+    ).json()
+    assert created["project_id"] == project_id
+
+    resp = await auth_client.patch(
+        f"/v1/scheduled-tasks/{created['id']}",
+        json={"project_id": None},
+        headers=_headers(),
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["project_id"] is None
+
+
+async def test_update_omitting_project_id_leaves_it_unchanged(
+    auth_client: httpx.AsyncClient, db_uri: str
+) -> None:
+    """Omitting ``project_id`` on PATCH leaves membership unchanged."""
+    _make_user(db_uri)
+    project_id = await _create_project(auth_client, "steady state")
+    created = (
+        await auth_client.post(
+            "/v1/scheduled-tasks",
+            json=_create_body(project_id=project_id),
+            headers=_headers(),
+        )
+    ).json()
+
+    resp = await auth_client.patch(
+        f"/v1/scheduled-tasks/{created['id']}",
+        json={"name": "renamed"},
+        headers=_headers(),
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["project_id"] == project_id
+
+
+async def test_update_rejects_nonexistent_project_id(
+    auth_client: httpx.AsyncClient, db_uri: str
+) -> None:
+    """PATCH rejects a ``project_id`` that does not exist."""
+    _make_user(db_uri)
+    created = (
+        await auth_client.post("/v1/scheduled-tasks", json=_create_body(), headers=_headers())
+    ).json()
+
+    resp = await auth_client.patch(
+        f"/v1/scheduled-tasks/{created['id']}",
+        json={"project_id": "00000000000000000000000000000000"},
+        headers=_headers(),
+    )
+    assert resp.status_code == 404, resp.text
 
 
 async def test_create_no_workspace_task_persists_null_host_and_workspace(

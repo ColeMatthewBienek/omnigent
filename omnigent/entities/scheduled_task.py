@@ -61,6 +61,9 @@ class ScheduledTask:
         firing, or ``None``.
     :param updated_at: Unix epoch seconds of the last write, or ``None`` if the
         row has never been updated.
+    :param project_id: First-class project a fired session is filed into
+        (relates to ``projects.id``; no DB foreign key, Rule R032). ``None``
+        means fired sessions are left unfiled.
     """
 
     id: str
@@ -82,6 +85,7 @@ class ScheduledTask:
     last_run_at: int | None = None
     last_run_conversation_id: str | None = None
     updated_at: int | None = None
+    project_id: str | None = None
 
 
 @dataclass

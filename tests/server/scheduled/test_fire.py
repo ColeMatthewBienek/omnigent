@@ -111,6 +111,7 @@ class FakeConversationStore:
     def __init__(self, *, fail_create: bool = False) -> None:
         self.created: list[dict[str, Any]] = []
         self.create_workspace_ids: list[int] = []
+        self.filed: list[tuple[str, str | None]] = []
         self._seq = 0
         self.fail_create = fail_create
 
@@ -134,6 +135,10 @@ class FakeConversationStore:
 
     def get_conversation(self, conversation_id: str) -> _FakeConversation | None:
         return _FakeConversation(id=conversation_id, agent_id="ag_1")
+
+    def set_conversation_project(self, conversation_id: str, project_id: str | None) -> bool:
+        self.filed.append((conversation_id, project_id))
+        return True
 
 
 class FakePermissionStore:
@@ -183,6 +188,18 @@ class FakeHostRegistry:
         return None
 
 
+class FakeProjectStore:
+    """Serves ``get`` from a fixed set of existing project ids."""
+
+    def __init__(self, existing: set[str] | None = None) -> None:
+        self.existing = existing or set()
+        self.gets: list[tuple[str, str | None]] = []
+
+    def get(self, project_id: str, *, owner_user_id: str | None) -> object | None:
+        self.gets.append((project_id, owner_user_id))
+        return object() if project_id in self.existing else None
+
+
 def _deps(sched_store: FakeScheduledTaskStore, **overrides: Any) -> FireDeps:
     return FireDeps(
         scheduled_task_store=sched_store,
@@ -196,6 +213,7 @@ def _deps(sched_store: FakeScheduledTaskStore, **overrides: Any) -> FireDeps:
         tunnel_registry=overrides.get("tunnel_registry"),
         file_store=overrides.get("file_store"),
         artifact_store=overrides.get("artifact_store"),
+        project_store=overrides.get("project_store"),
     )
 
 
@@ -334,6 +352,69 @@ async def test_active_creates_session_grant_and_run() -> None:
     assert len(store.runs) == 1
     assert any("last_run_at" in u for u in store.updates)
     assert any("last_run_conversation_id" in u for u in store.updates)
+
+
+@pytest.mark.asyncio
+async def test_fire_files_session_into_project() -> None:
+    """A task with a ``project_id`` files its fired session into it."""
+    perm = FakePermissionStore()
+    conv_store = FakeConversationStore()
+    project_store = FakeProjectStore(existing={"proj_1"})
+    store = FakeScheduledTaskStore(rows={"task_1": _task(project_id="proj_1")})
+
+    async def _launch(conv: Any, task: Any) -> None:
+        return None
+
+    on_fire = build_on_fire(
+        _deps(
+            store,
+            permission_store=perm,
+            conversation_store=conv_store,
+            project_store=project_store,
+        ),
+        launch_dispatch=_launch,
+    )
+    await on_fire(0, "task_1")
+    await _drain()
+
+    assert len(conv_store.created) == 1
+    assert conv_store.filed == [("conv_1", "proj_1")]
+    # The run still recorded normally.
+    assert len(store.runs) == 1
+
+
+@pytest.mark.asyncio
+async def test_fire_vanished_project_soft_fails_and_still_runs() -> None:
+    """A task pinning a project that no longer exists still fires — unfiled."""
+    perm = FakePermissionStore()
+    conv_store = FakeConversationStore()
+    # The project store has no rows: "proj_gone" no longer exists.
+    project_store = FakeProjectStore(existing=set())
+    store = FakeScheduledTaskStore(rows={"task_1": _task(project_id="proj_gone")})
+    launched: list[Any] = []
+
+    async def _launch(conv: Any, task: Any) -> None:
+        launched.append((conv, task))
+
+    on_fire = build_on_fire(
+        _deps(
+            store,
+            permission_store=perm,
+            conversation_store=conv_store,
+            project_store=project_store,
+        ),
+        launch_dispatch=_launch,
+    )
+    await on_fire(0, "task_1")
+    await _drain()
+
+    # No filing call was made — the session stays unfiled.
+    assert conv_store.filed == []
+    # But the run is NOT broken: session created, launched, and recorded.
+    assert len(conv_store.created) == 1
+    assert len(launched) == 1
+    assert len(store.runs) == 1
+    assert store.runs[0]["status"] == "running"
 
 
 @pytest.mark.asyncio

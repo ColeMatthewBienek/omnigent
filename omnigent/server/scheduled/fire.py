@@ -125,6 +125,7 @@ class FireDeps:
     tunnel_registry: Any | None = None
     file_store: Any | None = None
     artifact_store: Any | None = None
+    project_store: Any | None = None
 
 
 def _prompt_event(prompt: str) -> SessionEventInput:
@@ -425,6 +426,8 @@ async def _run_fire_for_task(
             )
             return
 
+        await _file_into_project(deps, task, conv.id)
+
         try:
             await _grant_owner(deps, task, conv.id)
         except Exception:
@@ -620,6 +623,50 @@ async def _grant_owner(deps: FireDeps, task: ScheduledTask, conversation_id: str
     owner = task.user_id or RESERVED_USER_LOCAL
     await asyncio.to_thread(deps.permission_store.ensure_user, owner)
     await asyncio.to_thread(deps.permission_store.grant, owner, conversation_id, LEVEL_OWNER)
+
+
+async def _file_into_project(deps: FireDeps, task: ScheduledTask, conversation_id: str) -> None:
+    """File the fired session into the task's project. Never raises.
+
+    Soft-fail by design: a project deleted after the task was created must
+    never break the scheduled run. Missing ``project_store`` (feature not
+    configured) and a vanished project id both log and leave the session
+    unfiled; only an unset ``task.project_id`` is a silent no-op.
+    """
+    if task.project_id is None:
+        return
+    try:
+        if deps.project_store is None:
+            _logger.warning(
+                "scheduled fire: task %s pins project %s but no project store is "
+                "configured — leaving session %s unfiled",
+                task.id,
+                task.project_id,
+                conversation_id,
+            )
+            return
+        owner = task.user_id or RESERVED_USER_LOCAL
+        project = await asyncio.to_thread(
+            deps.project_store.get, task.project_id, owner_user_id=owner
+        )
+        if project is None:
+            _logger.warning(
+                "scheduled fire: task %s project %s no longer exists — leaving session %s unfiled",
+                task.id,
+                task.project_id,
+                conversation_id,
+            )
+            return
+        await asyncio.to_thread(
+            deps.conversation_store.set_conversation_project, conversation_id, task.project_id
+        )
+    except Exception:
+        _logger.exception(
+            "scheduled fire: failed to file session %s into project %s for task %s",
+            conversation_id,
+            task.project_id,
+            task.id,
+        )
 
 
 async def _record_run(
