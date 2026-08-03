@@ -7,6 +7,7 @@ validation (400s) and live-scheduler sync on every mutation.
 
 from __future__ import annotations
 
+import uuid
 from collections.abc import AsyncIterator
 from pathlib import Path
 
@@ -341,6 +342,60 @@ async def test_update_heals_legacy_project_owner_on_unrelated_patch(
     assert healed is not None
     assert healed.project_id == project_id
     assert healed.project_owner == "alice@example.com"
+
+
+async def test_update_heal_leaves_legacy_project_owner_null_on_scope_mismatch(
+    runtime_init: None, db_uri: str, tmp_path: Path
+) -> None:
+    """Heal-on-update must NOT persist an unverified guess.
+
+    A legacy row's project was created auth-disabled (owner ``None``). The
+    server is NOW running local-single-user, so an unrelated rename PATCH
+    resolves the current-mode owner as ``RESERVED_USER_LOCAL`` — which does
+    NOT match the project's true ``None`` owner. The heal attempt's scoped
+    lookup must miss, and ``project_owner`` must stay NULL (not get
+    overwritten with the wrong, unverified ``"local"``) — otherwise this
+    legacy row would become permanently mis-owned: decode no longer falls
+    back once ``project_owner`` is non-NULL, so filing would stay broken even
+    after the server returns to auth-disabled.
+    """
+    from omnigent.stores.project_store.sqlalchemy_store import SqlAlchemyProjectStore
+
+    # The project's true owner is None — as if created while auth was fully
+    # disabled — regardless of what mode the PATCH below runs under.
+    project_id = uuid.uuid4().hex
+    SqlAlchemyProjectStore(db_uri).create(project_id, "orphaned legacy project", None)
+
+    # A legacy scheduled-task row: project_id set, project_owner never
+    # persisted (NULL), owned by the single local user (user_id None).
+    task_id = uuid.uuid4().hex
+    legacy_store = SqlAlchemyScheduledTaskStore(db_uri)
+    legacy_store.create(
+        scheduled_task_id=task_id,
+        name="nightly",
+        prompt="do the thing",
+        rrule=_VALID_RRULE,
+        user_id=None,
+        agent_id=builtin_agent_id(CLAUDE_NATIVE_AGENT_NAME),
+        timezone="UTC",
+        project_id=project_id,
+    )
+    assert legacy_store.get(task_id).project_owner is None  # type: ignore[union-attr]
+
+    # PATCH through a local-single-user app: headerless, resolves to "local".
+    app = _owner_mode_app("local_single_user", db_uri, tmp_path)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.patch(f"/v1/scheduled-tasks/{task_id}", json={"name": "renamed"})
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["name"] == "renamed"
+
+    # The heal attempt missed (project is None-owned, not "local"-owned) —
+    # project_owner MUST remain NULL, still recoverable by a later heal/fire.
+    still_legacy = legacy_store.get(task_id)
+    assert still_legacy is not None
+    assert still_legacy.project_id == project_id
+    assert still_legacy.project_owner is None
 
 
 # ── project_id across all three owner conventions ───────────────────────────

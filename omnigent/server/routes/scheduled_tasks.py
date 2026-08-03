@@ -335,6 +335,35 @@ def create_scheduled_tasks_router(
             raise OmnigentError("Project not found", code=ErrorCode.NOT_FOUND)
         return encode_scheduled_task_project_owner(project_owner)
 
+    async def _heal_legacy_project_owner(project_id: str, *, owner: str | None) -> str | None:
+        """Best-effort heal-on-update: resolve a legacy row's owner under the
+        CURRENT mode and confirm it with a scoped lookup — same discipline as
+        the fire path's heal-on-fire — persisting it ONLY on a confirmed hit.
+
+        Unlike :func:`_validate_project_id_or_404`, a miss here is NOT an
+        error: an unrelated PATCH (rename, RRULE change, ...) must never fail
+        just because current-mode resolution doesn't happen to match this
+        legacy project's true owner. On a miss, the row is left exactly as
+        it was (``project_owner`` stays NULL) so the live fallback in
+        :func:`~omnigent.server.auth.decode_scheduled_task_project_owner`
+        remains available for a future fire or heal attempt — writing an
+        UNVERIFIED resolved owner here would instead turn a recoverable
+        legacy row into a permanently wrong non-legacy one (decode would no
+        longer fall back), breaking filing even after the mode reverts.
+
+        :param project_id: The task's existing (non-``None``) ``project_id``.
+        :param owner: The task-ownership-normalized owner (``owner_id``).
+        :returns: The encoded owner to persist, or ``None`` if the lookup
+            missed (leave ``project_owner`` unset / still legacy).
+        """
+        if project_store is None:
+            return None
+        project_owner = resolve_project_owner(owner, local_single_user=_local_single_user)
+        owned = await asyncio.to_thread(project_store.get, project_id, owner_user_id=project_owner)
+        if owned is None:
+            return None
+        return encode_scheduled_task_project_owner(project_owner)
+
     def _require_owned(scheduled_task_id: str, owner: str | None) -> ScheduledTask:
         """Load a task the caller owns, or raise 404.
 
@@ -547,15 +576,18 @@ def create_scheduled_tasks_router(
         elif existing.project_id is not None and existing.project_owner is None:
             # Heal-on-update: a legacy row (project_id set, project_owner
             # never persisted — predates this column) gets its owner resolved
-            # under the CURRENT mode and persisted on ANY successful PATCH,
-            # not just one that touches project_id. Without this, a rename or
-            # RRULE-only PATCH would leave the row mode-dependent forever
-            # (see decode_scheduled_task_project_owner's fallback). Current-
-            # mode resolution is the best available for legacy data — the
-            # same accepted, bounded assumption the fallback itself makes.
-            fields["project_owner"] = encode_scheduled_task_project_owner(
-                resolve_project_owner(owner_id, local_single_user=_local_single_user)
-            )
+            # under the CURRENT mode and CONFIRMED with a scoped lookup on
+            # ANY successful PATCH, not just one that touches project_id.
+            # Without this, a rename or RRULE-only PATCH would leave the row
+            # mode-dependent forever (see
+            # decode_scheduled_task_project_owner's fallback). A miss (the
+            # legacy project's true owner doesn't match this mode's
+            # resolution) leaves the row untouched — see
+            # _heal_legacy_project_owner's docstring for why persisting an
+            # unverified guess would be worse than doing nothing.
+            healed_owner = await _heal_legacy_project_owner(existing.project_id, owner=owner_id)
+            if healed_owner is not None:
+                fields["project_owner"] = healed_owner
         if {"model_override", "reasoning_effort"}.intersection(fields):
             model_override, reasoning_effort = validate_session_model_metadata(
                 model_override=fields.get("model_override", existing.model_override),

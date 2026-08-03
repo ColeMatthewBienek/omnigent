@@ -697,6 +697,15 @@ async def _file_into_project(deps: FireDeps, task: ScheduledTask, conversation_i
             # confirmed correct for this row right now — persist it so the
             # fallback (and its live re-resolution) is not repeated on every
             # future fire, only up to the next auth-mode change or heal.
+            #
+            # Known, accepted race (inert): a concurrent PATCH that clears
+            # project_id between the read above and this write can have this
+            # write land after the clear, briefly leaving a non-null
+            # project_owner on a project_id=NULL row. Harmless — filing
+            # always gates on project_id first (see the top of this
+            # function) — and self-corrects on the task's next PATCH or
+            # delete. Not worth a conditional/CAS update for a single stray
+            # column value with no observable effect.
             await asyncio.to_thread(
                 deps.scheduled_task_store.update,
                 task.id,

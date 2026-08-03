@@ -608,6 +608,79 @@ async def test_fire_heals_legacy_project_owner_and_survives_later_mode_switch() 
 
 
 @pytest.mark.asyncio
+async def test_fire_leaves_legacy_row_null_on_scope_mismatch_and_still_fires_later() -> None:
+    """Companion to the route-level
+    ``test_update_heal_leaves_legacy_project_owner_null_on_scope_mismatch``:
+    a legacy row (``project_owner`` NULL) whose project is ``None``-owned
+    (created auth-disabled) fires FIRST under local-single-user mode. The
+    fallback resolves ``RESERVED_USER_LOCAL``, which does NOT match the
+    project's true ``None`` owner, so the lookup misses — this fire must
+    soft-fail unfiled WITHOUT persisting the unverified ``"local"`` guess
+    (mirrors heal-on-fire's existing "only heal on a confirmed hit"
+    discipline). A LATER fire back under auth-disabled mode must then
+    succeed, because the row is still legacy (NULL) and the fallback
+    re-resolves to the CORRECT ``None`` this time.
+    """
+    perm = FakePermissionStore()
+    conv_store = FakeConversationStore()
+    # The project's true owner is None, regardless of which mode fires below.
+    project_store = FakeProjectStore(existing={"proj_1": None})
+    store = FakeScheduledTaskStore(
+        rows={"task_1": _task(project_id="proj_1", user_id=None, project_owner=None)}
+    )
+    launched: list[Any] = []
+
+    async def _launch(conv: Any, task: Any) -> None:
+        launched.append((conv, task))
+
+    # First fire: local-single-user mode. Fallback resolves RESERVED_USER_LOCAL
+    # ("local"), which mismatches the project's true None owner — a miss.
+    on_fire_mismatch = build_on_fire(
+        _deps(
+            store,
+            permission_store=perm,
+            conversation_store=conv_store,
+            project_store=project_store,
+            local_single_user=True,
+        ),
+        launch_dispatch=_launch,
+    )
+    await on_fire_mismatch(0, "task_1")
+    await _drain()
+
+    assert project_store.gets == [("proj_1", RESERVED_USER_LOCAL)]
+    # Session still created/launched/recorded — just left unfiled.
+    assert conv_store.filed == []
+    assert len(conv_store.created) == 1
+    assert len(launched) == 1
+    assert len(store.runs) == 1
+    # No heal write on a miss — the row stays legacy (NULL), still
+    # recoverable by a later fire under the mode that actually matches.
+    assert not [u for u in store.updates if "project_owner" in u]
+
+    # Second fire: back to auth-disabled mode. The row is STILL legacy, so
+    # the fallback re-resolves — correctly, this time — to None, and filing
+    # succeeds (and heals the row).
+    on_fire_correct_mode = build_on_fire(
+        _deps(
+            store,
+            permission_store=perm,
+            conversation_store=conv_store,
+            project_store=project_store,
+            local_single_user=False,
+        ),
+        launch_dispatch=_launch,
+    )
+    await on_fire_correct_mode(0, "task_1")
+    await _drain()
+
+    assert project_store.gets == [("proj_1", RESERVED_USER_LOCAL), ("proj_1", None)]
+    assert conv_store.filed == [("conv_2", "proj_1")]
+    heal_writes = [u for u in store.updates if "project_owner" in u]
+    assert heal_writes == [{"id": "task_1", "project_owner": ""}]
+
+
+@pytest.mark.asyncio
 async def test_fire_vanished_project_soft_fails_and_still_runs() -> None:
     """A task pinning a project that no longer exists still fires — unfiled."""
     perm = FakePermissionStore()
