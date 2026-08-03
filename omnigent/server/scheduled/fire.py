@@ -645,9 +645,15 @@ async def _file_into_project(deps: FireDeps, task: ScheduledTask, conversation_i
                 conversation_id,
             )
             return
-        owner = task.user_id or RESERVED_USER_LOCAL
+        # Projects are owned by the RAW user_id (None in single-user / local
+        # mode) — see routes/projects.py's create_project (owner =
+        # require_user(...) directly, never RESERVED_USER_LOCAL) and
+        # scheduled_tasks.py's _validate_project_id_or_404 (owner_id = None
+        # when the caller resolved to RESERVED_USER_LOCAL). This is a
+        # DIFFERENT owner convention than the LEVEL_OWNER session grant below,
+        # which does fold None to RESERVED_USER_LOCAL — do not conflate them.
         project = await asyncio.to_thread(
-            deps.project_store.get, task.project_id, owner_user_id=owner
+            deps.project_store.get, task.project_id, owner_user_id=task.user_id
         )
         if project is None:
             _logger.warning(
@@ -657,9 +663,17 @@ async def _file_into_project(deps: FireDeps, task: ScheduledTask, conversation_i
                 conversation_id,
             )
             return
-        await asyncio.to_thread(
+        filed = await asyncio.to_thread(
             deps.conversation_store.set_conversation_project, conversation_id, task.project_id
         )
+        if not filed:
+            _logger.warning(
+                "scheduled fire: task %s session %s has no metadata row — could not file "
+                "into project %s",
+                task.id,
+                conversation_id,
+                task.project_id,
+            )
     except Exception:
         _logger.exception(
             "scheduled fire: failed to file session %s into project %s for task %s",

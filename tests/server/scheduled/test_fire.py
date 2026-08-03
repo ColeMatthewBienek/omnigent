@@ -189,15 +189,22 @@ class FakeHostRegistry:
 
 
 class FakeProjectStore:
-    """Serves ``get`` from a fixed set of existing project ids."""
+    """Serves ``get`` from ``{project_id: owner_user_id}``, exactly like the
+    real :class:`ProjectStore`: a project owned by someone else (or by a
+    different owner scope, e.g. ``None`` vs ``"local"``) is treated as not
+    found, not just a missing id."""
 
-    def __init__(self, existing: set[str] | None = None) -> None:
-        self.existing = existing or set()
+    def __init__(self, existing: dict[str, str | None] | None = None) -> None:
+        self.existing = existing or {}
         self.gets: list[tuple[str, str | None]] = []
 
     def get(self, project_id: str, *, owner_user_id: str | None) -> object | None:
         self.gets.append((project_id, owner_user_id))
-        return object() if project_id in self.existing else None
+        if project_id not in self.existing:
+            return None
+        if self.existing[project_id] != owner_user_id:
+            return None
+        return object()
 
 
 def _deps(sched_store: FakeScheduledTaskStore, **overrides: Any) -> FireDeps:
@@ -356,11 +363,14 @@ async def test_active_creates_session_grant_and_run() -> None:
 
 @pytest.mark.asyncio
 async def test_fire_files_session_into_project() -> None:
-    """A task with a ``project_id`` files its fired session into it."""
+    """A task with a ``project_id`` files its fired session into it (multi-user
+    owner)."""
     perm = FakePermissionStore()
     conv_store = FakeConversationStore()
-    project_store = FakeProjectStore(existing={"proj_1"})
-    store = FakeScheduledTaskStore(rows={"task_1": _task(project_id="proj_1")})
+    project_store = FakeProjectStore(existing={"proj_1": "alice@example.com"})
+    store = FakeScheduledTaskStore(
+        rows={"task_1": _task(project_id="proj_1", user_id="alice@example.com")}
+    )
 
     async def _launch(conv: Any, task: Any) -> None:
         return None
@@ -384,12 +394,49 @@ async def test_fire_files_session_into_project() -> None:
 
 
 @pytest.mark.asyncio
+async def test_fire_files_session_into_project_for_local_null_owner() -> None:
+    """Regression: a NULL-owner task (single-user / local mode) files into a
+    project owned by ``None`` — the SAME owner convention
+    ``routes/projects.py``'s ``create_project`` and
+    ``scheduled_tasks.py``'s ``_validate_project_id_or_404`` use.
+
+    The fire path must resolve the project lookup owner as the task's RAW
+    ``user_id`` (``None`` here), NOT fold it to ``RESERVED_USER_LOCAL`` the
+    way the LEVEL_OWNER session grant does — those are different owner
+    conventions. Folding to ``RESERVED_USER_LOCAL`` would make every local
+    project's owner mismatch and every local task's project look vanished.
+    """
+    perm = FakePermissionStore()
+    conv_store = FakeConversationStore()
+    project_store = FakeProjectStore(existing={"proj_local": None})
+    store = FakeScheduledTaskStore(rows={"task_1": _task(project_id="proj_local", user_id=None)})
+
+    async def _launch(conv: Any, task: Any) -> None:
+        return None
+
+    on_fire = build_on_fire(
+        _deps(
+            store,
+            permission_store=perm,
+            conversation_store=conv_store,
+            project_store=project_store,
+        ),
+        launch_dispatch=_launch,
+    )
+    await on_fire(0, "task_1")
+    await _drain()
+
+    assert project_store.gets == [("proj_local", None)]
+    assert conv_store.filed == [("conv_1", "proj_local")]
+
+
+@pytest.mark.asyncio
 async def test_fire_vanished_project_soft_fails_and_still_runs() -> None:
     """A task pinning a project that no longer exists still fires — unfiled."""
     perm = FakePermissionStore()
     conv_store = FakeConversationStore()
     # The project store has no rows: "proj_gone" no longer exists.
-    project_store = FakeProjectStore(existing=set())
+    project_store = FakeProjectStore(existing={})
     store = FakeScheduledTaskStore(rows={"task_1": _task(project_id="proj_gone")})
     launched: list[Any] = []
 
