@@ -24,7 +24,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from omnigent.entities import ScheduledTask, ScheduledTaskRun
 from omnigent.errors import ErrorCode, OmnigentError
-from omnigent.server.auth import RESERVED_USER_LOCAL, AuthProvider
+from omnigent.server.auth import RESERVED_USER_LOCAL, AuthProvider, resolve_project_owner
 from omnigent.server.routes._auth_helpers import require_user
 from omnigent.server.routes._host_launch import resolve_host_owner
 from omnigent.server.routes._session_create_validation import (
@@ -202,6 +202,14 @@ def create_scheduled_tasks_router(
     """
     router = APIRouter()
 
+    # Computed once from the SAME auth_provider instance the routes use to
+    # resolve identity, so the fire path (which is wired from this exact
+    # provider in app.py) can never drift from what this router does. See
+    # ``resolve_project_owner``.
+    _local_single_user = (
+        auth_provider.is_local_single_user() if auth_provider is not None else False
+    )
+
     def _owner(request: Request) -> str:
         """Resolve the calling user, mapping the auth-disabled case to
         ``RESERVED_USER_LOCAL`` so single-user rows are always owned."""
@@ -291,6 +299,12 @@ def create_scheduled_tasks_router(
         ``None`` (unset / unfiling) is always valid and skips the lookup.
         Loud rejection at create/update time — the fire path separately
         soft-fails a project that vanishes later.
+
+        :param owner: The task-ownership-normalized owner (``owner_id`` —
+            ``None`` for "the single local user", whichever mode produced
+            that). Resolved to the project's actual owner scope via
+            :func:`resolve_project_owner` before the lookup — see that
+            function's docstring for why this indirection is required.
         """
         if project_id is None:
             return
@@ -299,7 +313,8 @@ def create_scheduled_tasks_router(
                 "Filing a scheduled task into a project is not supported by this server",
                 code=ErrorCode.INVALID_INPUT,
             )
-        owned = await asyncio.to_thread(project_store.get, project_id, owner_user_id=owner)
+        project_owner = resolve_project_owner(owner, local_single_user=_local_single_user)
+        owned = await asyncio.to_thread(project_store.get, project_id, owner_user_id=project_owner)
         if owned is None:
             raise OmnigentError("Project not found", code=ErrorCode.NOT_FOUND)
 

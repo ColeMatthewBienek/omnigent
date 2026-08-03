@@ -19,6 +19,7 @@ from omnigent.db.utils import builtin_agent_id
 from omnigent.native_coding_agents import CLAUDE_NATIVE_AGENT_NAME
 from omnigent.runtime.agent_cache import AgentCache
 from omnigent.server.app import create_app
+from omnigent.server.auth import AuthProvider, UnifiedAuthProvider
 from omnigent.server.routes import scheduled_tasks as scheduled_tasks_routes
 from omnigent.stores.agent_store.sqlalchemy_store import SqlAlchemyAgentStore
 from omnigent.stores.artifact_store.local import LocalArtifactStore
@@ -302,6 +303,133 @@ async def test_update_rejects_nonexistent_project_id(
         headers=_headers(),
     )
     assert resp.status_code == 404, resp.text
+
+
+# ── project_id across all three owner conventions ───────────────────────────
+#
+# Real deployments run in exactly one of three modes:
+#
+# * ``auth_disabled``     — no AuthProvider at all; every identity is ``None``.
+# * ``local_single_user`` — an AuthProvider configured with
+#   ``local_single_user=True`` (``OMNIGENT_LOCAL_SINGLE_USER=1`` in
+#   production); a headerless request resolves to the literal
+#   ``RESERVED_USER_LOCAL`` ("local") identity. This is the mode the managed
+#   local server actually runs in, and the one prior review rounds missed.
+# * ``multi_user``        — header auth with a real per-request identity.
+#
+# create_project (routes/projects.py) always stores the RAW identity as a
+# project's owner. These tests exercise scheduled-task project validation
+# (create + update) against a project genuinely owned under each mode, with NO
+# host/workspace pinned so no lifespan/harness setup is needed.
+
+_OWNER_MODES = ("auth_disabled", "local_single_user", "multi_user")
+
+
+def _owner_mode_auth_provider(mode: str) -> AuthProvider | None:
+    if mode == "auth_disabled":
+        return None
+    if mode == "local_single_user":
+        return UnifiedAuthProvider(source="header", local_single_user=True)
+    if mode == "multi_user":
+        return UnifiedAuthProvider(source="header", local_single_user=False)
+    raise ValueError(mode)  # pragma: no cover — parametrize IDs are fixed above
+
+
+def _owner_mode_headers(mode: str) -> dict[str, str]:
+    """Headers a request in this mode carries. Both local modes are
+    headerless — ``auth_disabled`` has no header check at all, and
+    ``local_single_user`` deliberately falls back to ``"local"`` when the
+    header is absent (see :meth:`AuthProvider.is_local_single_user`)."""
+    if mode == "multi_user":
+        return _headers("alice@example.com")
+    return {}
+
+
+def _owner_mode_app(mode: str, db_uri: str, tmp_path: Path) -> FastAPI:
+    """A minimal app for one owner mode — no host_store (nothing pins a host).
+
+    ``create_app`` requires ``auth_provider`` whenever ``permission_store`` is
+    given, so ``auth_disabled`` (the one mode with no provider) also omits the
+    permission store — matching a real auth-disabled deployment, which has
+    neither.
+    """
+    artifact_store = LocalArtifactStore(str(tmp_path / "artifacts"))
+    auth_provider = _owner_mode_auth_provider(mode)
+    return create_app(
+        agent_store=SqlAlchemyAgentStore(db_uri),
+        file_store=SqlAlchemyFileStore(db_uri),
+        conversation_store=SqlAlchemyConversationStore(db_uri),
+        artifact_store=artifact_store,
+        agent_cache=AgentCache(artifact_store=artifact_store, cache_dir=tmp_path / "cache"),
+        permission_store=SqlAlchemyPermissionStore(db_uri) if auth_provider is not None else None,
+        scheduled_task_store=SqlAlchemyScheduledTaskStore(db_uri),
+        project_store=SqlAlchemyProjectStore(db_uri),
+        auth_provider=auth_provider,
+    )
+
+
+def _hostless_body(**overrides: object) -> dict[str, object]:
+    """A create body with no host/workspace pinned (project validation only
+    needs this — no live host/harness required)."""
+    body = _create_body(**overrides)
+    del body["workspace"]
+    del body["host_id"]
+    return body
+
+
+@pytest.mark.parametrize("mode", _OWNER_MODES)
+async def test_create_with_project_id_across_owner_modes(
+    mode: str, runtime_init: None, db_uri: str, tmp_path: Path
+) -> None:
+    """Creating with a ``project_id`` owned under THIS mode's identity must
+    resolve and file — not 404 as "not found" the way local-single-user did
+    before ``resolve_project_owner``."""
+    app = _owner_mode_app(mode, db_uri, tmp_path)
+    headers = _owner_mode_headers(mode)
+    async with app.router.lifespan_context(app):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            proj_resp = await client.post("/v1/projects", json={"name": "owned"}, headers=headers)
+            assert proj_resp.status_code == 200, proj_resp.text
+            project_id = proj_resp.json()["id"]
+
+            resp = await client.post(
+                "/v1/scheduled-tasks",
+                json=_hostless_body(project_id=project_id),
+                headers=headers,
+            )
+            assert resp.status_code == 200, resp.text
+            assert resp.json()["project_id"] == project_id
+
+
+@pytest.mark.parametrize("mode", _OWNER_MODES)
+async def test_update_with_project_id_across_owner_modes(
+    mode: str, runtime_init: None, db_uri: str, tmp_path: Path
+) -> None:
+    """PATCH-ing a ``project_id`` owned under THIS mode's identity must
+    resolve and file — the update path funnels through the same
+    ``_validate_project_id_or_404`` as create, but is verified independently
+    since a prior review round did not."""
+    app = _owner_mode_app(mode, db_uri, tmp_path)
+    headers = _owner_mode_headers(mode)
+    async with app.router.lifespan_context(app):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            proj_resp = await client.post("/v1/projects", json={"name": "owned"}, headers=headers)
+            assert proj_resp.status_code == 200, proj_resp.text
+            project_id = proj_resp.json()["id"]
+
+            created = (
+                await client.post("/v1/scheduled-tasks", json=_hostless_body(), headers=headers)
+            ).json()
+
+            resp = await client.patch(
+                f"/v1/scheduled-tasks/{created['id']}",
+                json={"project_id": project_id},
+                headers=headers,
+            )
+            assert resp.status_code == 200, resp.text
+            assert resp.json()["project_id"] == project_id
 
 
 async def test_create_no_workspace_task_persists_null_host_and_workspace(

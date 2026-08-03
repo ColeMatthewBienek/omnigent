@@ -221,6 +221,7 @@ def _deps(sched_store: FakeScheduledTaskStore, **overrides: Any) -> FireDeps:
         file_store=overrides.get("file_store"),
         artifact_store=overrides.get("artifact_store"),
         project_store=overrides.get("project_store"),
+        local_single_user=overrides.get("local_single_user", False),
     )
 
 
@@ -361,15 +362,61 @@ async def test_active_creates_session_grant_and_run() -> None:
     assert any("last_run_conversation_id" in u for u in store.updates)
 
 
+@dataclass
+class _OwnerModeCase:
+    """One of the three owner conventions ``resolve_project_owner`` must
+    reconcile between ``scheduled_tasks.user_id`` and a project's
+    ``owner_user_id``."""
+
+    mode_id: str
+    task_user_id: str | None
+    local_single_user: bool
+    project_owner: str | None
+
+
+_OWNER_MODE_CASES = [
+    _OwnerModeCase(
+        "auth_disabled", task_user_id=None, local_single_user=False, project_owner=None
+    ),
+    _OwnerModeCase(
+        "local_single_user",
+        task_user_id=None,
+        local_single_user=True,
+        project_owner=RESERVED_USER_LOCAL,
+    ),
+    _OwnerModeCase(
+        "multi_user",
+        task_user_id="alice@example.com",
+        local_single_user=False,
+        project_owner="alice@example.com",
+    ),
+]
+
+
 @pytest.mark.asyncio
-async def test_fire_files_session_into_project() -> None:
-    """A task with a ``project_id`` files its fired session into it (multi-user
-    owner)."""
+@pytest.mark.parametrize("case", _OWNER_MODE_CASES, ids=lambda c: c.mode_id)
+async def test_fire_files_session_into_project_across_owner_modes(case: _OwnerModeCase) -> None:
+    """A task's ``project_id`` files into the SAME owner scope a project of
+    that mode is actually stored under, in all three owner conventions:
+
+    * ``auth_disabled`` — no :class:`AuthProvider` at all; both the task's
+      ``user_id`` and the project's owner are ``None``.
+    * ``local_single_user`` — an :class:`AuthProvider` configured with
+      ``local_single_user=True``; the task's ``user_id`` is STILL ``None``
+      (scheduled-task ownership normalizes "the local user" to ``None``
+      regardless of why), but the project is owned by the literal
+      ``RESERVED_USER_LOCAL`` (``"local"``) — the raw identity
+      ``routes/projects.py``'s ``create_project`` stored it under. The fire
+      path must reconstruct THIS via ``FireDeps.local_single_user``, not
+      look up the project under ``None`` (which would treat every local
+      project as vanished — the bug from the prior review round).
+    * ``multi_user`` — a real user id owns both the task and the project.
+    """
     perm = FakePermissionStore()
     conv_store = FakeConversationStore()
-    project_store = FakeProjectStore(existing={"proj_1": "alice@example.com"})
+    project_store = FakeProjectStore(existing={"proj_1": case.project_owner})
     store = FakeScheduledTaskStore(
-        rows={"task_1": _task(project_id="proj_1", user_id="alice@example.com")}
+        rows={"task_1": _task(project_id="proj_1", user_id=case.task_user_id)}
     )
 
     async def _launch(conv: Any, task: Any) -> None:
@@ -381,53 +428,18 @@ async def test_fire_files_session_into_project() -> None:
             permission_store=perm,
             conversation_store=conv_store,
             project_store=project_store,
+            local_single_user=case.local_single_user,
         ),
         launch_dispatch=_launch,
     )
     await on_fire(0, "task_1")
     await _drain()
 
+    assert project_store.gets == [("proj_1", case.project_owner)]
     assert len(conv_store.created) == 1
     assert conv_store.filed == [("conv_1", "proj_1")]
     # The run still recorded normally.
     assert len(store.runs) == 1
-
-
-@pytest.mark.asyncio
-async def test_fire_files_session_into_project_for_local_null_owner() -> None:
-    """Regression: a NULL-owner task (single-user / local mode) files into a
-    project owned by ``None`` — the SAME owner convention
-    ``routes/projects.py``'s ``create_project`` and
-    ``scheduled_tasks.py``'s ``_validate_project_id_or_404`` use.
-
-    The fire path must resolve the project lookup owner as the task's RAW
-    ``user_id`` (``None`` here), NOT fold it to ``RESERVED_USER_LOCAL`` the
-    way the LEVEL_OWNER session grant does — those are different owner
-    conventions. Folding to ``RESERVED_USER_LOCAL`` would make every local
-    project's owner mismatch and every local task's project look vanished.
-    """
-    perm = FakePermissionStore()
-    conv_store = FakeConversationStore()
-    project_store = FakeProjectStore(existing={"proj_local": None})
-    store = FakeScheduledTaskStore(rows={"task_1": _task(project_id="proj_local", user_id=None)})
-
-    async def _launch(conv: Any, task: Any) -> None:
-        return None
-
-    on_fire = build_on_fire(
-        _deps(
-            store,
-            permission_store=perm,
-            conversation_store=conv_store,
-            project_store=project_store,
-        ),
-        launch_dispatch=_launch,
-    )
-    await on_fire(0, "task_1")
-    await _drain()
-
-    assert project_store.gets == [("proj_local", None)]
-    assert conv_store.filed == [("conv_1", "proj_local")]
 
 
 @pytest.mark.asyncio

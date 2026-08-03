@@ -214,6 +214,46 @@ def local_single_user_enabled() -> bool:
     return env_var_is_truthy(_LOCAL_SINGLE_USER_ENV)
 
 
+def resolve_project_owner(user_id: str | None, *, local_single_user: bool) -> str | None:
+    """Map a stored "owner or None" column to the identity a project is
+    actually owned under.
+
+    Some rows (e.g. ``scheduled_tasks.user_id``) store ``None`` to mean
+    "the single local user" regardless of *why* that request had no real
+    identity — auth fully disabled (no :class:`AuthProvider` at all) and
+    local-single-user mode (an :class:`AuthProvider` configured with
+    ``local_single_user=True``, falling back to :data:`RESERVED_USER_LOCAL`
+    for headerless requests) both collapse to ``None`` there. But
+    :class:`~omnigent.stores.project_store.ProjectStore` rows are owned by
+    the RAW identity ``require_user``/``get_user_id`` returned at creation
+    (see ``routes/projects.py``'s ``create_project`` and
+    ``routes/sessions/routes_core.py``'s project-filing PATCH handler) —
+    which is ``None`` when auth is fully disabled, but the literal
+    :data:`RESERVED_USER_LOCAL` string in local-single-user mode. This
+    reconstructs that raw identity from a ``None``-collapsed owner so a
+    project lookup uses the SAME scope the project was created under,
+    whichever mode produced it.
+
+    Any caller resolving a scheduled task's project scope (route validation
+    at create/update, and the fire path's filing lookup) MUST go through this
+    one function with the SAME ``local_single_user`` value (both sourced from
+    the server's single :class:`AuthProvider` instance via
+    :meth:`AuthProvider.is_local_single_user`) so the two call sites cannot
+    drift out of sync.
+
+    :param user_id: A stored/normalized owner value — ``None`` for "the
+        single local user", or a real user id otherwise.
+    :param local_single_user: Whether the server's active auth provider is
+        configured for the local-single-user posture (``False`` when auth is
+        fully disabled, since there ``None`` already IS the raw identity).
+    :returns: The identity a project created under the same conditions is
+        actually owned by.
+    """
+    if user_id is not None:
+        return user_id
+    return RESERVED_USER_LOCAL if local_single_user else None
+
+
 def resolve_auth_header() -> str:
     """Resolve the trusted identity header name for header-auth mode.
 
@@ -325,6 +365,19 @@ class AuthProvider(ABC):
         """Return the authenticated user ID, or ``None``."""
         ...
 
+    def is_local_single_user(self) -> bool:
+        """Whether this provider resolves a headerless request to ``"local"``.
+
+        Default ``False`` (fail-closed posture — a bare request without
+        identity is unauthenticated). :class:`UnifiedAuthProvider` overrides
+        this to report its own ``local_single_user`` construction flag.
+        Used by :func:`resolve_project_owner` — a caller with no auth
+        provider at all should pass ``False`` (there is no "local" identity
+        concept when auth is fully disabled; a request's identity is simply
+        ``None``).
+        """
+        return False
+
     def mint_runner_token(self, user_id: str, ttl_seconds: int) -> str | None:  # noqa: ARG002
         """
         Mint a short-lived bearer a managed-sandbox runner presents as *user_id*.
@@ -421,6 +474,15 @@ class UnifiedAuthProvider(AuthProvider):
             grant is revoked or unknown (fail closed).
         """
         self._grant_revoked = check
+
+    def is_local_single_user(self) -> bool:
+        """Whether this provider is configured for the local-single-user posture.
+
+        Mirrors the ``local_single_user`` constructor flag (see the class
+        docstring) — ``True`` means a headerless request resolves to
+        :data:`RESERVED_USER_LOCAL` rather than 401ing.
+        """
+        return self._local_single_user
 
     @property
     def login_url(self) -> str | None:

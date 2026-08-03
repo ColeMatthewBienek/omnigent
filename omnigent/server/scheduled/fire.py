@@ -55,7 +55,7 @@ from typing import Any
 from omnigent.db.db_models import workspace_scope
 from omnigent.entities import Conversation, ScheduledTask
 from omnigent.errors import ErrorCode, OmnigentError
-from omnigent.server.auth import LEVEL_OWNER, RESERVED_USER_LOCAL
+from omnigent.server.auth import LEVEL_OWNER, RESERVED_USER_LOCAL, resolve_project_owner
 from omnigent.server.routes._session_create_validation import (
     validate_existing_host_workspace,
     validate_session_agent,
@@ -126,6 +126,13 @@ class FireDeps:
     file_store: Any | None = None
     artifact_store: Any | None = None
     project_store: Any | None = None
+    # Whether the server's active AuthProvider is configured for the
+    # local-single-user posture (see AuthProvider.is_local_single_user).
+    # MUST be sourced from the SAME provider instance the scheduled-tasks
+    # router resolves identity through (app.py wires both from one
+    # ``auth_provider``), so ``resolve_project_owner`` calls here and in the
+    # routes can never drift apart. False when auth is fully disabled.
+    local_single_user: bool = False
 
 
 def _prompt_event(prompt: str) -> SessionEventInput:
@@ -645,15 +652,18 @@ async def _file_into_project(deps: FireDeps, task: ScheduledTask, conversation_i
                 conversation_id,
             )
             return
-        # Projects are owned by the RAW user_id (None in single-user / local
-        # mode) — see routes/projects.py's create_project (owner =
-        # require_user(...) directly, never RESERVED_USER_LOCAL) and
-        # scheduled_tasks.py's _validate_project_id_or_404 (owner_id = None
-        # when the caller resolved to RESERVED_USER_LOCAL). This is a
-        # DIFFERENT owner convention than the LEVEL_OWNER session grant below,
-        # which does fold None to RESERVED_USER_LOCAL — do not conflate them.
+        # task.user_id is the task-ownership-normalized owner (None for "the
+        # single local user", whichever mode produced that). Projects are
+        # owned by the RAW identity instead (None only when auth is fully
+        # disabled; RESERVED_USER_LOCAL in local-single-user mode) — see
+        # resolve_project_owner's docstring. This is also a DIFFERENT owner
+        # convention than the LEVEL_OWNER session grant below, which folds
+        # None to RESERVED_USER_LOCAL unconditionally — do not conflate them.
+        project_owner = resolve_project_owner(
+            task.user_id, local_single_user=deps.local_single_user
+        )
         project = await asyncio.to_thread(
-            deps.project_store.get, task.project_id, owner_user_id=task.user_id
+            deps.project_store.get, task.project_id, owner_user_id=project_owner
         )
         if project is None:
             _logger.warning(
