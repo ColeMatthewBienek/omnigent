@@ -700,12 +700,17 @@ async def _file_into_project(deps: FireDeps, task: ScheduledTask, conversation_i
             #
             # Known, accepted race (inert): a concurrent PATCH that clears
             # project_id between the read above and this write can have this
-            # write land after the clear, briefly leaving a non-null
+            # write land after the clear, briefly leaving a stale non-null
             # project_owner on a project_id=NULL row. Harmless — filing
             # always gates on project_id first (see the top of this
-            # function) — and self-corrects on the task's next PATCH or
-            # delete. Not worth a conditional/CAS update for a single stray
-            # column value with no observable effect.
+            # function), so a stale project_owner is simply never read. It
+            # does NOT self-correct on an unrelated later PATCH (heal-on-update
+            # only touches project_owner when project_id is set and
+            # project_owner is NULL — a non-null stray value is left alone);
+            # it is overwritten only by a PATCH that itself sets project_id
+            # again, or made moot by deleting the task. Not worth a
+            # conditional/CAS update for a single stray column value with no
+            # observable effect.
             await asyncio.to_thread(
                 deps.scheduled_task_store.update,
                 task.id,

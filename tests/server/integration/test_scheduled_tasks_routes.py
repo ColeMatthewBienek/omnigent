@@ -398,6 +398,71 @@ async def test_update_heal_leaves_legacy_project_owner_null_on_scope_mismatch(
     assert still_legacy.project_owner is None
 
 
+async def test_update_heal_lookup_failure_does_not_break_the_patch(
+    runtime_init: None,
+    db_uri: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Heal-on-update is best-effort: a transient ``project_store.get``
+    failure during an UNRELATED PATCH of a legacy row must never fail the
+    caller's own update. It's caught, logged, and treated like a miss —
+    ``project_owner`` stays NULL (still recoverable), and the PATCH's own
+    fields are still written normally.
+    """
+
+    class _RaisingProjectStore(SqlAlchemyProjectStore):
+        def get(self, project_id: str, *, owner_user_id: str | None) -> None:
+            raise RuntimeError("transient project-store failure")
+
+    project_id = uuid.uuid4().hex
+    SqlAlchemyProjectStore(db_uri).create(project_id, "flaky lookup project", None)
+
+    # A legacy row: project_id set, project_owner never persisted (NULL).
+    task_id = uuid.uuid4().hex
+    legacy_store = SqlAlchemyScheduledTaskStore(db_uri)
+    legacy_store.create(
+        scheduled_task_id=task_id,
+        name="nightly",
+        prompt="do the thing",
+        rrule=_VALID_RRULE,
+        user_id=None,
+        agent_id=builtin_agent_id(CLAUDE_NATIVE_AGENT_NAME),
+        timezone="UTC",
+        project_id=project_id,
+    )
+
+    warnings: list[str] = []
+    monkeypatch.setattr(
+        scheduled_tasks_routes._logger,
+        "exception",
+        lambda msg, *args, **kwargs: warnings.append(msg % args if args else msg),
+    )
+
+    artifact_store = LocalArtifactStore(str(tmp_path / "artifacts"))
+    app = create_app(
+        agent_store=SqlAlchemyAgentStore(db_uri),
+        file_store=SqlAlchemyFileStore(db_uri),
+        conversation_store=SqlAlchemyConversationStore(db_uri),
+        artifact_store=artifact_store,
+        agent_cache=AgentCache(artifact_store=artifact_store, cache_dir=tmp_path / "cache"),
+        scheduled_task_store=SqlAlchemyScheduledTaskStore(db_uri),
+        project_store=_RaisingProjectStore(db_uri),
+        auth_provider=None,
+    )
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.patch(f"/v1/scheduled-tasks/{task_id}", json={"name": "renamed"})
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["name"] == "renamed"
+
+    still_legacy = legacy_store.get(task_id)
+    assert still_legacy is not None
+    assert still_legacy.project_owner is None
+    assert any("heal-on-update" in w for w in warnings)
+
+
 # ── project_id across all three owner conventions ───────────────────────────
 #
 # Real deployments run in exactly one of three modes:

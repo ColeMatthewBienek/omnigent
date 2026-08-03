@@ -351,15 +351,31 @@ def create_scheduled_tasks_router(
         legacy row into a permanently wrong non-legacy one (decode would no
         longer fall back), breaking filing even after the mode reverts.
 
+        Best-effort ALSO means never letting the caller's PATCH fail because
+        of this: an exception from the lookup (a transient project-store
+        error) is caught, logged, and treated exactly like a miss — the
+        PATCH's own fields still get written normally. Mirrors how the fire
+        path's heal-on-fire never lets a healing failure break the run.
+
         :param project_id: The task's existing (non-``None``) ``project_id``.
         :param owner: The task-ownership-normalized owner (``owner_id``).
         :returns: The encoded owner to persist, or ``None`` if the lookup
-            missed (leave ``project_owner`` unset / still legacy).
+            missed or failed (leave ``project_owner`` unset / still legacy).
         """
         if project_store is None:
             return None
-        project_owner = resolve_project_owner(owner, local_single_user=_local_single_user)
-        owned = await asyncio.to_thread(project_store.get, project_id, owner_user_id=project_owner)
+        try:
+            project_owner = resolve_project_owner(owner, local_single_user=_local_single_user)
+            owned = await asyncio.to_thread(
+                project_store.get, project_id, owner_user_id=project_owner
+            )
+        except Exception:
+            _logger.exception(
+                "heal-on-update: project_store lookup for project %s failed; "
+                "leaving project_owner unresolved",
+                project_id,
+            )
+            return None
         if owned is None:
             return None
         return encode_scheduled_task_project_owner(project_owner)
