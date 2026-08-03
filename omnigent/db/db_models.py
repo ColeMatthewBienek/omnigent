@@ -1489,6 +1489,18 @@ class SqlScheduledTask(OmnigentBase):
     # left unfiled. A vanished project is soft-failed at fire time, not
     # enforced here.
     project_id: Mapped[str | None] = mapped_column(Uuid16, nullable=True)
+    # The ProjectStore owner scope project_id was validated under, resolved
+    # ONCE at create/update time (see
+    # omnigent.server.auth.encode_scheduled_task_project_owner /
+    # resolve_project_owner) rather than re-resolved at fire time against
+    # whatever auth mode the server happens to be running under THEN — the
+    # server's auth mode can change (e.g. across a restart) after the task
+    # was created, and a real user id or the "" anonymous-owner sentinel is
+    # otherwise indistinguishable from NULL. NULL means either project_id is
+    # unset, or this is a legacy row that predates this column (see
+    # decode_scheduled_task_project_owner's fallback). String(128) matches
+    # user_id's width — same identity domain.
+    project_owner: Mapped[str | None] = mapped_column(String(128), nullable=True)
 
     __table_args__ = (
         CheckConstraint("state IN (1, 2, 3)", name="ck_scheduled_tasks_state"),

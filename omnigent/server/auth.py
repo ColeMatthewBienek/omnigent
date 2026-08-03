@@ -216,7 +216,7 @@ def local_single_user_enabled() -> bool:
 
 def resolve_project_owner(user_id: str | None, *, local_single_user: bool) -> str | None:
     """Map a stored "owner or None" column to the identity a project is
-    actually owned under.
+    actually owned under, AT THE CURRENT MOMENT this is called.
 
     Some rows (e.g. ``scheduled_tasks.user_id``) store ``None`` to mean
     "the single local user" regardless of *why* that request had no real
@@ -230,16 +230,22 @@ def resolve_project_owner(user_id: str | None, *, local_single_user: bool) -> st
     ``routes/sessions/routes_core.py``'s project-filing PATCH handler) —
     which is ``None`` when auth is fully disabled, but the literal
     :data:`RESERVED_USER_LOCAL` string in local-single-user mode. This
-    reconstructs that raw identity from a ``None``-collapsed owner so a
-    project lookup uses the SAME scope the project was created under,
-    whichever mode produced it.
+    reconstructs that raw identity from a ``None``-collapsed owner, using
+    whatever auth mode is active RIGHT NOW.
 
-    Any caller resolving a scheduled task's project scope (route validation
-    at create/update, and the fire path's filing lookup) MUST go through this
-    one function with the SAME ``local_single_user`` value (both sourced from
-    the server's single :class:`AuthProvider` instance via
-    :meth:`AuthProvider.is_local_single_user`) so the two call sites cannot
-    drift out of sync.
+    IMPORTANT — this is only safe to call at the moment a project's
+    membership is being ESTABLISHED (create/update, which just validated the
+    project under this exact resolution) or as a last-resort fallback for a
+    row that predates persisting the resolved owner (see
+    :func:`decode_scheduled_task_project_owner`). It is NOT safe to call at
+    fire time against an already-created task's stored ``user_id``: the
+    server's auth mode can change between a task's creation and a later fire
+    (e.g. a restart that flips ``OMNIGENT_LOCAL_SINGLE_USER``), silently
+    resolving to the WRONG owner scope and making a still-valid project look
+    vanished. The fire path instead reads the owner scope persisted at
+    create/update time via ``scheduled_tasks.project_owner`` — see
+    :func:`encode_scheduled_task_project_owner` /
+    :func:`decode_scheduled_task_project_owner`.
 
     :param user_id: A stored/normalized owner value — ``None`` for "the
         single local user", or a real user id otherwise.
@@ -252,6 +258,64 @@ def resolve_project_owner(user_id: str | None, *, local_single_user: bool) -> st
     if user_id is not None:
         return user_id
     return RESERVED_USER_LOCAL if local_single_user else None
+
+
+# Sentinel stored in ``scheduled_tasks.project_owner`` for "we resolved the
+# owner and it really is None" (auth fully disabled). Distinct from SQL NULL,
+# which means "this row predates project_owner persistence" (see
+# decode_scheduled_task_project_owner). No real identity is ever the empty
+# string — emails are non-empty and RESERVED_USER_LOCAL is "local" — so this
+# is an unambiguous, collision-free choice.
+_PROJECT_OWNER_ANONYMOUS = ""
+
+
+def encode_scheduled_task_project_owner(owner: str | None) -> str:
+    """Encode a resolved project owner (from :func:`resolve_project_owner`)
+    for storage in ``scheduled_tasks.project_owner``.
+
+    Call this ONCE, at create/update validation time, right after resolving
+    and confirming the project exists under this owner — never at fire time
+    (see :func:`resolve_project_owner`'s docstring for why re-resolving there
+    is unsafe across an auth-mode change).
+
+    :param owner: The resolved owner — ``None``, :data:`RESERVED_USER_LOCAL`,
+        or a real user id.
+    :returns: The value to persist. Never ``None`` — a task with no project
+        filed persists ``project_owner=None`` (NULL) separately; this
+        function is only called when a project IS being filed.
+    """
+    return owner if owner is not None else _PROJECT_OWNER_ANONYMOUS
+
+
+def decode_scheduled_task_project_owner(
+    stored: str | None, *, user_id: str | None, local_single_user: bool
+) -> str | None:
+    """Decode a stored ``scheduled_tasks.project_owner`` back to the real
+    project-ownership scope, for the fire path's filing lookup.
+
+    ``NULL`` (``stored is None``) means this row predates ``project_owner``
+    persistence — a one-time migration gap for tasks with a ``project_id``
+    set before this column existed. For those legacy rows only, this falls
+    back to re-resolving from the task's normalized ``user_id`` under
+    whichever auth mode is active RIGHT NOW (an accepted limitation stated
+    explicitly here: a legacy task's project can still look vanished if the
+    server's auth mode changed between the task's creation and this
+    resolution — the same limitation the feature had before this column was
+    added). Every OTHER value — including the empty-string
+    :data:`_PROJECT_OWNER_ANONYMOUS` sentinel — is the exact owner resolved
+    and persisted at create/update time, immune to any later auth-mode
+    change.
+
+    :param stored: The raw ``scheduled_tasks.project_owner`` column value.
+    :param user_id: The task's ``user_id``, used only for the legacy
+        (``stored is None``) fallback.
+    :param local_single_user: The CURRENT server's auth mode, used only for
+        the legacy fallback.
+    :returns: The project-ownership scope to look the project up under.
+    """
+    if stored is None:
+        return resolve_project_owner(user_id, local_single_user=local_single_user)
+    return stored if stored != _PROJECT_OWNER_ANONYMOUS else None
 
 
 def resolve_auth_header() -> str:
@@ -476,13 +540,19 @@ class UnifiedAuthProvider(AuthProvider):
         self._grant_revoked = check
 
     def is_local_single_user(self) -> bool:
-        """Whether this provider is configured for the local-single-user posture.
+        """Whether a headerless request on THIS provider resolves to ``"local"``.
 
-        Mirrors the ``local_single_user`` constructor flag (see the class
-        docstring) — ``True`` means a headerless request resolves to
-        :data:`RESERVED_USER_LOCAL` rather than 401ing.
+        The ``local_single_user`` constructor flag is only consulted by
+        ``_check_header`` in ``"header"`` mode (see the class docstring); an
+        ``"oidc"``/``"accounts"`` provider always requires a real cookie
+        session regardless of the flag's value, so this is source-aware
+        rather than echoing the raw flag — a provider constructed with
+        ``source="oidc", local_single_user=True`` (an unusual combination,
+        but not rejected at construction) must NOT report ``True`` here, or
+        callers like :func:`resolve_project_owner` would resolve a project
+        owner scope this provider's requests can never actually produce.
         """
-        return self._local_single_user
+        return self._source == "header" and self._local_single_user
 
     @property
     def login_url(self) -> str | None:

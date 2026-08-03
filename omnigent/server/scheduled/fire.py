@@ -55,7 +55,11 @@ from typing import Any
 from omnigent.db.db_models import workspace_scope
 from omnigent.entities import Conversation, ScheduledTask
 from omnigent.errors import ErrorCode, OmnigentError
-from omnigent.server.auth import LEVEL_OWNER, RESERVED_USER_LOCAL, resolve_project_owner
+from omnigent.server.auth import (
+    LEVEL_OWNER,
+    RESERVED_USER_LOCAL,
+    decode_scheduled_task_project_owner,
+)
 from omnigent.server.routes._session_create_validation import (
     validate_existing_host_workspace,
     validate_session_agent,
@@ -652,15 +656,20 @@ async def _file_into_project(deps: FireDeps, task: ScheduledTask, conversation_i
                 conversation_id,
             )
             return
-        # task.user_id is the task-ownership-normalized owner (None for "the
-        # single local user", whichever mode produced that). Projects are
-        # owned by the RAW identity instead (None only when auth is fully
-        # disabled; RESERVED_USER_LOCAL in local-single-user mode) — see
-        # resolve_project_owner's docstring. This is also a DIFFERENT owner
-        # convention than the LEVEL_OWNER session grant below, which folds
-        # None to RESERVED_USER_LOCAL unconditionally — do not conflate them.
-        project_owner = resolve_project_owner(
-            task.user_id, local_single_user=deps.local_single_user
+        # task.project_owner is the owner scope RESOLVED AND PERSISTED at
+        # create/update time (see routes/scheduled_tasks.py's
+        # _validate_project_id_or_404) — read directly rather than
+        # re-resolved from task.user_id against deps.local_single_user here.
+        # Re-resolving at fire time would be wrong whenever the server's auth
+        # mode changed since the task was created (e.g. across a restart that
+        # flips OMNIGENT_LOCAL_SINGLE_USER): decode_scheduled_task_project_owner
+        # only falls back to that live re-resolution for a legacy row that
+        # predates this column (project_owner is NULL) — see its docstring
+        # for the accepted limitation that applies to that gap only.
+        project_owner = decode_scheduled_task_project_owner(
+            task.project_owner,
+            user_id=task.user_id,
+            local_single_user=deps.local_single_user,
         )
         project = await asyncio.to_thread(
             deps.project_store.get, task.project_id, owner_user_id=project_owner

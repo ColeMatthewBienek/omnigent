@@ -26,7 +26,11 @@ import pytest
 
 from omnigent.db.db_models import current_workspace_id
 from omnigent.entities import ScheduledTask
-from omnigent.server.auth import LEVEL_OWNER, RESERVED_USER_LOCAL
+from omnigent.server.auth import (
+    LEVEL_OWNER,
+    RESERVED_USER_LOCAL,
+    encode_scheduled_task_project_owner,
+)
 from omnigent.server.scheduled import fire as fire_mod
 from omnigent.server.scheduled.fire import FireDeps, build_on_fire, build_run_now
 
@@ -364,9 +368,8 @@ async def test_active_creates_session_grant_and_run() -> None:
 
 @dataclass
 class _OwnerModeCase:
-    """One of the three owner conventions ``resolve_project_owner`` must
-    reconcile between ``scheduled_tasks.user_id`` and a project's
-    ``owner_user_id``."""
+    """One of the three owner conventions a task's persisted ``project_owner``
+    must reconcile with a project's ``owner_user_id``."""
 
     mode_id: str
     task_user_id: str | None
@@ -406,17 +409,27 @@ async def test_fire_files_session_into_project_across_owner_modes(case: _OwnerMo
       (scheduled-task ownership normalizes "the local user" to ``None``
       regardless of why), but the project is owned by the literal
       ``RESERVED_USER_LOCAL`` (``"local"``) — the raw identity
-      ``routes/projects.py``'s ``create_project`` stored it under. The fire
-      path must reconstruct THIS via ``FireDeps.local_single_user``, not
-      look up the project under ``None`` (which would treat every local
-      project as vanished — the bug from the prior review round).
+      ``routes/projects.py``'s ``create_project`` stored it under.
     * ``multi_user`` — a real user id owns both the task and the project.
+
+    ``task.project_owner`` is the value the ROUTES persisted at create/update
+    time (``encode_scheduled_task_project_owner(case.project_owner)``); the
+    fire path decodes it directly rather than re-deriving it from
+    ``task.user_id`` + the CURRENT server's mode — see
+    ``test_fire_files_session_into_project_survives_auth_mode_change`` for why
+    that distinction matters.
     """
     perm = FakePermissionStore()
     conv_store = FakeConversationStore()
     project_store = FakeProjectStore(existing={"proj_1": case.project_owner})
     store = FakeScheduledTaskStore(
-        rows={"task_1": _task(project_id="proj_1", user_id=case.task_user_id)}
+        rows={
+            "task_1": _task(
+                project_id="proj_1",
+                user_id=case.task_user_id,
+                project_owner=encode_scheduled_task_project_owner(case.project_owner),
+            )
+        }
     )
 
     async def _launch(conv: Any, task: Any) -> None:
@@ -440,6 +453,69 @@ async def test_fire_files_session_into_project_across_owner_modes(case: _OwnerMo
     assert conv_store.filed == [("conv_1", "proj_1")]
     # The run still recorded normally.
     assert len(store.runs) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "created_local_single_user",
+    [False, True],
+    ids=["auth_disabled_to_local_single_user", "local_single_user_to_auth_disabled"],
+)
+async def test_fire_files_session_into_project_survives_auth_mode_change(
+    created_local_single_user: bool,
+) -> None:
+    """Regression: a task's project filing must survive an auth-mode change
+    between creation and fire (e.g. a server restart that flips
+    ``OMNIGENT_LOCAL_SINGLE_USER``), in BOTH directions.
+
+    The task's ``project_owner`` was resolved and persisted at create time
+    under ``created_local_single_user``'s mode (``None`` — auth fully
+    disabled — encodes to ``""``; local-single-user encodes to
+    ``RESERVED_USER_LOCAL``). The project is owned under that SAME resolved
+    scope. The fire path runs under the OPPOSITE mode
+    (``fired_local_single_user``) — simulating the restart — and must still
+    resolve the project's true owner from the persisted ``project_owner``,
+    NOT re-derive a (wrong) scope from ``task.user_id`` under the new mode.
+    Before persisting ``project_owner``, re-resolving at fire time from a
+    flipped mode would look the project up under the wrong scope and treat a
+    still-valid project as vanished.
+    """
+    created_owner = RESERVED_USER_LOCAL if created_local_single_user else None
+    fired_local_single_user = not created_local_single_user
+
+    perm = FakePermissionStore()
+    conv_store = FakeConversationStore()
+    project_store = FakeProjectStore(existing={"proj_1": created_owner})
+    store = FakeScheduledTaskStore(
+        rows={
+            "task_1": _task(
+                project_id="proj_1",
+                user_id=None,
+                project_owner=encode_scheduled_task_project_owner(created_owner),
+            )
+        }
+    )
+
+    async def _launch(conv: Any, task: Any) -> None:
+        return None
+
+    on_fire = build_on_fire(
+        _deps(
+            store,
+            permission_store=perm,
+            conversation_store=conv_store,
+            project_store=project_store,
+            # The OPPOSITE of the mode the task/project were created under —
+            # simulating a restart into the other mode before this fire.
+            local_single_user=fired_local_single_user,
+        ),
+        launch_dispatch=_launch,
+    )
+    await on_fire(0, "task_1")
+    await _drain()
+
+    assert project_store.gets == [("proj_1", created_owner)]
+    assert conv_store.filed == [("conv_1", "proj_1")]
 
 
 @pytest.mark.asyncio

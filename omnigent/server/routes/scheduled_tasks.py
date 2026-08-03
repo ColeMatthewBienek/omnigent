@@ -24,7 +24,12 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from omnigent.entities import ScheduledTask, ScheduledTaskRun
 from omnigent.errors import ErrorCode, OmnigentError
-from omnigent.server.auth import RESERVED_USER_LOCAL, AuthProvider, resolve_project_owner
+from omnigent.server.auth import (
+    RESERVED_USER_LOCAL,
+    AuthProvider,
+    encode_scheduled_task_project_owner,
+    resolve_project_owner,
+)
 from omnigent.server.routes._auth_helpers import require_user
 from omnigent.server.routes._host_launch import resolve_host_owner
 from omnigent.server.routes._session_create_validation import (
@@ -293,21 +298,32 @@ def create_scheduled_tasks_router(
         )
         return canonical_workspace, validated_model, validated_effort
 
-    async def _validate_project_id_or_404(project_id: str | None, *, owner: str | None) -> None:
+    async def _validate_project_id_or_404(
+        project_id: str | None, *, owner: str | None
+    ) -> str | None:
         """Reject a ``project_id`` the caller does not own or that doesn't exist.
 
         ``None`` (unset / unfiling) is always valid and skips the lookup.
         Loud rejection at create/update time — the fire path separately
         soft-fails a project that vanishes later.
 
+        Returns the RESOLVED owner scope (encoded for storage) so the caller
+        persists it into ``scheduled_tasks.project_owner`` alongside
+        ``project_id`` — the fire path then reads that stored value directly
+        instead of re-resolving ownership against whatever auth mode the
+        server happens to be running at fire time (unsafe across an
+        auth-mode change; see ``resolve_project_owner``'s docstring).
+
         :param owner: The task-ownership-normalized owner (``owner_id`` —
             ``None`` for "the single local user", whichever mode produced
             that). Resolved to the project's actual owner scope via
             :func:`resolve_project_owner` before the lookup — see that
             function's docstring for why this indirection is required.
+        :returns: ``None`` when ``project_id`` is ``None``; otherwise the
+            encoded owner to persist as ``project_owner``.
         """
         if project_id is None:
-            return
+            return None
         if project_store is None:
             raise OmnigentError(
                 "Filing a scheduled task into a project is not supported by this server",
@@ -317,6 +333,7 @@ def create_scheduled_tasks_router(
         owned = await asyncio.to_thread(project_store.get, project_id, owner_user_id=project_owner)
         if owned is None:
             raise OmnigentError("Project not found", code=ErrorCode.NOT_FOUND)
+        return encode_scheduled_task_project_owner(project_owner)
 
     def _require_owned(scheduled_task_id: str, owner: str | None) -> ScheduledTask:
         """Load a task the caller owns, or raise 404.
@@ -339,7 +356,7 @@ def create_scheduled_tasks_router(
         owner_id = None if owner == RESERVED_USER_LOCAL else owner
         _validate_rrule_or_400(body.rrule)
         _validate_timezone_or_400(body.timezone)
-        await _validate_project_id_or_404(body.project_id, owner=owner_id)
+        project_owner = await _validate_project_id_or_404(body.project_id, owner=owner_id)
         workspace, model_override, reasoning_effort = await _validate_launch_inputs(
             request,
             owner=owner,
@@ -362,6 +379,7 @@ def create_scheduled_tasks_router(
             workspace=workspace,
             host_id=body.host_id,
             project_id=body.project_id,
+            project_owner=project_owner,
         )
         scheduler = _scheduler(request)
         if scheduler is not None:
@@ -523,7 +541,9 @@ def create_scheduled_tasks_router(
             _validate_timezone_or_400(body.timezone)
         fields = body.model_dump(exclude_unset=True)
         if "project_id" in fields:
-            await _validate_project_id_or_404(fields["project_id"], owner=owner_id)
+            fields["project_owner"] = await _validate_project_id_or_404(
+                fields["project_id"], owner=owner_id
+            )
         if {"model_override", "reasoning_effort"}.intersection(fields):
             model_override, reasoning_effort = validate_session_model_metadata(
                 model_override=fields.get("model_override", existing.model_override),
