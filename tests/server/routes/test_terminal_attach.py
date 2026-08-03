@@ -42,6 +42,7 @@ from omnigent.server.auth import (
     UnifiedAuthProvider,
 )
 from omnigent.server.routes.terminal_attach import create_terminal_attach_router
+from omnigent.server.ws_origin import FORBIDDEN_ORIGIN_CLOSE_CODE, WebSocketOriginMiddleware
 from omnigent.terminals import TerminalRegistry
 from tests.runner.helpers import make_test_terminal_instance
 
@@ -208,6 +209,7 @@ def app(server_registry: TerminalRegistry, runner_client_reset: None) -> FastAPI
     del server_registry, runner_client_reset
     app = FastAPI()
     app.include_router(create_terminal_attach_router(), prefix="/v1")
+    app.add_middleware(WebSocketOriginMiddleware)
     return app
 
 
@@ -615,6 +617,54 @@ async def test_attach_terminal_runner_close_propagates_close_code(
             ws.receive_bytes()
 
     assert exc_info.value.code == 4404
+
+
+@pytest.mark.parametrize("host", ["192.168.1.50:8000", "10.0.2.2:8000"])
+def test_attach_terminal_accepts_same_origin_mobile_websocket(
+    app: FastAPI,
+    monkeypatch: pytest.MonkeyPatch,
+    host: str,
+) -> None:
+    """A LAN or Android-emulator page can attach to its own terminal socket."""
+    monkeypatch.setenv("OMNIGENT_LOCAL_SINGLE_USER", "1")
+    factory = _FakeRunnerWSFactory(_FakeRunnerWSConn(outgoing=[b"terminal output"]))
+    set_runner_ws_factory(factory)
+    attach_path = (
+        "/v1/sessions/conv_mobile/resources/terminals/terminal_bash_s1/attach?read_only=true"
+    )
+
+    with TestClient(app).websocket_connect(
+        f"ws://{host}{attach_path}",
+        headers={"origin": f"http://{host}"},
+    ) as ws:
+        assert ws.receive_bytes() == b"terminal output"
+        with pytest.raises(WebSocketDisconnect):
+            ws.receive_bytes()
+
+    assert factory.calls == [
+        "/v1/sessions/conv_mobile/resources/terminals/terminal_bash_s1/attach?read_only=true"
+    ]
+
+
+def test_attach_terminal_rejects_cross_origin_mobile_websocket(
+    app: FastAPI,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A browser page hosted elsewhere cannot attach in local mode."""
+    monkeypatch.setenv("OMNIGENT_LOCAL_SINGLE_USER", "1")
+    factory = _FakeRunnerWSFactory(_FakeRunnerWSConn())
+    set_runner_ws_factory(factory)
+
+    with pytest.raises(WebSocketDisconnect) as exc_info:
+        with TestClient(app).websocket_connect(
+            "ws://192.168.1.50:8000/v1/sessions/conv_mobile/resources/terminals/"
+            "terminal_bash_s1/attach",
+            headers={"origin": "http://192.168.1.51:8000"},
+        ):
+            pass
+
+    assert exc_info.value.code == FORBIDDEN_ORIGIN_CLOSE_CODE
+    assert factory.calls == []
 
 
 # ── WS attach: local fallback when no ws factory ─────────
