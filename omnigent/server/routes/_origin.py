@@ -23,9 +23,10 @@ WebSocket share exactly one trust boundary:
   ``"omnigent://internal"``) and any origin in
   ``OMNIGENT_WS_ALLOWED_ORIGINS`` pass;
 - in single-user **local mode** (no cookie / proxy auth) a present
-  ``Origin`` must exactly match the request target or be a loopback host —
-  this is where the guard actually bites, since that deployment has no other
-  CSRF defense;
+  ``Origin`` must be a loopback host, or explicitly allowlisted via
+  ``OMNIGENT_WS_ALLOWED_ORIGINS`` (e.g. for a mobile/LAN WebView origin such
+  as Android emulator ``http://10.0.2.2:8000``) — this is where the guard
+  actually bites, since that deployment has no other CSRF defense;
 - in authenticated (cookie / proxy) modes a present ``Origin`` passes
   unless an explicit allowlist is configured.
 
@@ -40,7 +41,7 @@ from __future__ import annotations
 from fastapi import HTTPException, Request
 
 from omnigent.server.auth import local_single_user_enabled
-from omnigent.server.ws_origin import origin_allowed, origin_matches_scope, parse_allowed_origins
+from omnigent.server.ws_origin import origin_allowed, parse_allowed_origins
 
 
 def require_trusted_origin(request: Request) -> None:
@@ -53,9 +54,8 @@ def require_trusted_origin(request: Request) -> None:
     has **no** ``Origin`` (modern browsers always send one, so absence is
     not a browser CSRF vector — this preserves backward compatibility for
     non-browser and older clients), carries the first-party sentinel or an
-    allowlisted origin, exactly matches the request target, or (in local
-    single-user mode) carries a loopback ``Origin``. A present ``Origin``
-    that is none of those is rejected.
+    allowlisted origin, or (in local single-user mode) carries a loopback
+    ``Origin``. A present ``Origin`` that is none of those is rejected.
 
     First-party non-browser clients (the Python SDK, the runner, the REPL)
     may announce themselves with ``Origin: omnigent://internal``
@@ -75,7 +75,7 @@ def require_trusted_origin(request: Request) -> None:
     # soon — first-party clients (SDK, runner, the test harness) already
     # announce themselves with the sentinel Origin. To close it, reject a
     # ``None`` origin here before delegating.
-    if origin_matches_scope(origin, request.scope) or origin_allowed(
+    if origin_allowed(
         origin,
         local_mode=local_single_user_enabled(),
         extra_allowed=parse_allowed_origins(),

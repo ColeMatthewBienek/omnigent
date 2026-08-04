@@ -27,7 +27,6 @@ from omnigent.server.ws_origin import (
     WebSocketOriginMiddleware,
     origin_allowed,
     origin_hostname_is_loopback,
-    origin_matches_scope,
     parse_allowed_origins,
 )
 
@@ -86,43 +85,6 @@ def test_origin_hostname_is_loopback(origin: str, expected: bool) -> None:
     :returns: None.
     """
     assert origin_hostname_is_loopback(origin) is expected
-
-
-@pytest.mark.parametrize(
-    "origin,scope,expected",
-    [
-        (
-            "http://10.0.2.2:8000",
-            {
-                "type": "http",
-                "scheme": "http",
-                "headers": [(b"host", b"10.0.2.2:8000")],
-            },
-            True,
-        ),
-        (
-            "https://server.example.com",
-            {
-                "type": "websocket",
-                "scheme": "wss",
-                "headers": [(b"host", b"server.example.com:443")],
-            },
-            True,
-        ),
-        (
-            "https://evil.example.com",
-            {
-                "type": "http",
-                "scheme": "https",
-                "headers": [(b"host", b"server.example.com")],
-            },
-            False,
-        ),
-    ],
-)
-def test_origin_matches_scope(origin: str, scope: dict[str, Any], expected: bool) -> None:
-    """Only the exact request target is same-origin, including mobile hosts."""
-    assert origin_matches_scope(origin, scope) is expected
 
 
 # --------------------------------------------------------------------------
@@ -532,3 +494,57 @@ def test_e2e_allowlist_denies_unlisted_origin_in_non_local_mode(
         assert ws.receive_text() == "echo:hi"
     # Only the allowlisted connection reached the route.
     assert app.state.accepted == [True]
+
+
+def test_e2e_local_mode_admits_mobile_origin_via_allowlist(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A non-loopback mobile/LAN origin connects once allowlisted.
+
+    Android emulator WebViews reach the server through ``10.0.2.2``, a
+    non-loopback host. That origin must be explicitly added to
+    ``OMNIGENT_WS_ALLOWED_ORIGINS`` to be admitted in local mode.
+
+    :param monkeypatch: pytest env patcher.
+    :returns: None.
+    """
+    monkeypatch.setenv(_LOCAL_ENV, "1")
+    monkeypatch.setenv(_ALLOWLIST_ENV, "http://10.0.2.2:8000")
+    app = _make_app()
+    client = TestClient(app)
+
+    with client.websocket_connect(
+        "/ws",
+        headers={"origin": "http://10.0.2.2:8000", "host": "10.0.2.2:8000"},
+    ) as ws:
+        ws.send_text("hi")
+        assert ws.receive_text() == "echo:hi"
+    assert app.state.accepted == [True]
+
+
+def test_e2e_local_mode_rejects_dns_rebinding(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A Host-matching, non-allowlisted Origin is rejected (DNS rebinding).
+
+    ``Host`` is client-controllable, so an attacker hostname rebound to
+    the server's address can send an ``Origin`` that exactly equals
+    ``Host``. That must never be trusted on its own: this is the core
+    proof the DNS-rebinding hole is closed.
+
+    :param monkeypatch: pytest env patcher.
+    :returns: None.
+    """
+    monkeypatch.setenv(_LOCAL_ENV, "1")
+    app = _make_app()
+    client = TestClient(app)
+
+    with pytest.raises(WebSocketDisconnect) as exc_info:
+        with client.websocket_connect(
+            "/ws",
+            headers={
+                "origin": "http://attacker.example:8000",
+                "host": "attacker.example:8000",
+            },
+        ):
+            pass
+    assert exc_info.value.code == FORBIDDEN_ORIGIN_CLOSE_CODE
+    assert app.state.accepted == []

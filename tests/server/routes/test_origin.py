@@ -114,14 +114,15 @@ def test_loopback_origin_is_allowed_in_local_mode(monkeypatch: pytest.MonkeyPatc
     assert require_trusted_origin(_request_with_origin("http://localhost:8000")) is None
 
 
-def test_mobile_same_origin_is_allowed_in_local_mode(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A mobile WebView may use a non-loopback address for the local server.
+def test_mobile_origin_is_allowed_via_allowlist(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A non-loopback mobile/LAN origin connects once allowlisted.
 
-    Android's emulator reaches the host through ``10.0.2.2``. Its WebView
-    loads the Omnigent server directly, so its Origin exactly matches the
-    request target and is not a cross-site CSRF request.
+    Android emulator WebViews reach the server through ``10.0.2.2``, a
+    non-loopback host. That origin must be explicitly added to
+    ``OMNIGENT_WS_ALLOWED_ORIGINS`` to be admitted in local mode.
     """
     monkeypatch.setenv(_LOCAL_ENV, "1")
+    monkeypatch.setenv(_ALLOWLIST_ENV, "http://10.0.2.2:8000")
     assert (
         require_trusted_origin(_request_with_origin("http://10.0.2.2:8000", host="10.0.2.2:8000"))
         is None
@@ -141,6 +142,22 @@ def test_cross_origin_is_rejected_in_local_mode(monkeypatch: pytest.MonkeyPatch)
         require_trusted_origin(_request_with_origin(_EVIL_ORIGIN))
     # 403 Forbidden is the documented rejection status for an untrusted
     # Origin; any other code (or no raise) means the guard did not fire.
+    assert exc_info.value.status_code == 403
+
+
+def test_dns_rebinding_rejected_in_local_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A Host-matching, non-allowlisted Origin is rejected (DNS rebinding).
+
+    ``Host`` is client-controllable, so an attacker hostname rebound to
+    the server's address can send an ``Origin`` that exactly equals
+    ``Host``. That must never be trusted on its own: this is the core
+    proof the DNS-rebinding hole is closed.
+    """
+    monkeypatch.setenv(_LOCAL_ENV, "1")
+    with pytest.raises(HTTPException) as exc_info:
+        require_trusted_origin(
+            _request_with_origin("http://attacker.example:8000", host="attacker.example:8000")
+        )
     assert exc_info.value.status_code == 403
 
 
