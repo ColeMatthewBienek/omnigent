@@ -366,9 +366,7 @@ def create_scheduled_tasks_router(
             return None
         try:
             project_owner = resolve_project_owner(owner, local_single_user=_local_single_user)
-            owned = await asyncio.to_thread(
-                project_store.get, project_id, user_id=project_owner
-            )
+            owned = await asyncio.to_thread(project_store.get, project_id, user_id=project_owner)
         except Exception:
             _logger.exception(
                 "heal-on-update: project_store lookup for project %s failed; "

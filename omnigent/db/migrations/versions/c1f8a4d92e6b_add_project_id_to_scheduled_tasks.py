@@ -1,8 +1,14 @@
 """add project_id to scheduled_tasks
 
-Revision ID: d5e6f7a8b9c0
-Revises: c4d5e6f7a8b9
+Revision ID: c1f8a4d92e6b
+Revises: e6f7a8b9c0d1
 Create Date: 2026-08-03 00:00:00.000000
+
+Rebased to descend from e6f7a8b9c0d1 (compress projects.config): this
+migration originally reused the revision id d5e6f7a8b9c0, which collided
+with upstream's independently-created d5e6f7a8b9c0 (rename
+projects.owner_user_id). Renumbered to a fresh id during the upstream
+merge; no behavior change.
 
 Lets a scheduled task file its fired sessions into a first-class project.
 Adds a nullable ``project_id`` (Uuid16) to ``scheduled_tasks``, mirroring
@@ -24,8 +30,8 @@ from alembic import op
 
 from omnigent.db.db_models import Uuid16
 
-revision: str = "d5e6f7a8b9c0"
-down_revision: str | None = "c4d5e6f7a8b9"
+revision: str = "c1f8a4d92e6b"
+down_revision: str | None = "e6f7a8b9c0d1"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

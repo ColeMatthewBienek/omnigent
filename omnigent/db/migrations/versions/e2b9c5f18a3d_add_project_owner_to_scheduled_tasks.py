@@ -1,8 +1,14 @@
 """add project_owner to scheduled_tasks
 
-Revision ID: e6f7a8b9c0d1
-Revises: d5e6f7a8b9c0
+Revision ID: e2b9c5f18a3d
+Revises: c1f8a4d92e6b
 Create Date: 2026-08-03 00:00:00.000001
+
+Rebased to descend from c1f8a4d92e6b (add_project_id_to_scheduled_tasks):
+this migration originally reused the revision id e6f7a8b9c0d1, which
+collided with upstream's independently-created e6f7a8b9c0d1 (compress
+projects.config). Renumbered to a fresh id during the upstream merge; no
+behavior change.
 
 Persists the ``ProjectStore`` owner scope a task's ``project_id`` was
 validated and filed under, resolved ONCE at create/update time (see
@@ -38,8 +44,8 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "e6f7a8b9c0d1"
-down_revision: str | None = "d5e6f7a8b9c0"
+revision: str = "e2b9c5f18a3d"
+down_revision: str | None = "c1f8a4d92e6b"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

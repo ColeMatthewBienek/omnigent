@@ -1942,8 +1942,7 @@ async def test_resolve_agent_spec_from_server_merges_global_mcp_servers(
 ) -> None:
     """Server-provided MCP defaults are available to every resolved agent."""
     config_bytes = (
-        b"spec_version: 1\nname: browser-agent\nexecutor:\n"
-        b"  config:\n    harness: claude-sdk\n"
+        b"spec_version: 1\nname: browser-agent\nexecutor:\n  config:\n    harness: claude-sdk\n"
     )
     bundle_buf = io.BytesIO()
     with tarfile.open(fileobj=bundle_buf, mode="w:gz") as tf:
