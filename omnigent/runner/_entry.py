@@ -987,6 +987,11 @@ async def _resolve_agent_spec_from_server(
     :raises RuntimeError: If the server returns a non-200 status
         other than 404.
     """
+    from omnigent.global_mcp import (
+        GLOBAL_MCP_SERVERS_HEADER,
+        apply_global_mcp_servers,
+        global_mcp_servers_from_header,
+    )
     from omnigent.runner.native import ResolvedSpec
     from omnigent.spec import load
 
@@ -1032,6 +1037,10 @@ async def _resolve_agent_spec_from_server(
         dest.mkdir(parents=True)
         load(resp.content, dest=dest, expand_env=expand_env, prune_invalid_sub_agents=True)
     spec = load(dest, expand_env=expand_env, prune_invalid_sub_agents=True)
+    spec = apply_global_mcp_servers(
+        spec,
+        global_mcp_servers_from_header(resp.headers.get(GLOBAL_MCP_SERVERS_HEADER)),
+    )
     return ResolvedSpec(spec=spec, workdir=dest)
 
 

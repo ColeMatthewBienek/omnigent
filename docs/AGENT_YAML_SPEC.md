@@ -291,6 +291,29 @@ tools:
       Authorization: Bearer ${TOKEN}
 ```
 
+### Server-wide MCP defaults
+
+Administrators can make a trusted stdio MCP server available to every agent
+resolved through an Omnigent server. Add it to the server's
+`~/.omnigent/config.yaml` (or the file passed with `omnigent server --config`):
+
+```yaml
+global_mcp_servers:
+  - name: playwright
+    transport: stdio
+    command: playwright-mcp
+    args: []
+```
+
+The configured server is merged into every top-level agent and sub-agent. A
+global name takes precedence over a same-named bundle declaration. Install the
+matching MCP package and Chromium on every runner host before enabling it:
+
+```bash
+npm install -g @playwright/mcp@0.0.78
+node "$(npm root -g)/@playwright/mcp/node_modules/playwright/cli.js" install --with-deps chromium
+```
+
 ### Python function tool
 
 ```yaml

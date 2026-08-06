@@ -8,8 +8,10 @@ import tempfile
 from pathlib import Path
 
 from omnigent.entities import LoadedAgent
+from omnigent.global_mcp import apply_global_mcp_servers
 from omnigent.spec import AgentSpec
 from omnigent.spec import load as load_spec
+from omnigent.spec.types import MCPServerConfig
 from omnigent.stores.artifact_store import ArtifactStore
 
 
@@ -34,7 +36,13 @@ class AgentCache:
     :func:`omnigent.spec.load`.
     """
 
-    def __init__(self, artifact_store: ArtifactStore, cache_dir: Path) -> None:
+    def __init__(
+        self,
+        artifact_store: ArtifactStore,
+        cache_dir: Path,
+        *,
+        global_mcp_servers: list[MCPServerConfig] | None = None,
+    ) -> None:
         """
         Initialize the two-tier agent cache.
 
@@ -47,6 +55,19 @@ class AgentCache:
         self._artifact_store = artifact_store
         self._cache_dir = cache_dir
         self._specs: dict[str, AgentSpec] = {}
+        self._global_mcp_servers = list(global_mcp_servers or [])
+
+    def set_global_mcp_servers(self, servers: list[MCPServerConfig]) -> None:
+        """Apply trusted server MCP defaults to future and cached spec loads."""
+        self._global_mcp_servers = list(servers)
+        self._specs = {
+            agent_id: apply_global_mcp_servers(spec, self._global_mcp_servers)
+            for agent_id, spec in self._specs.items()
+        }
+
+    def _with_global_mcp_servers(self, spec: AgentSpec) -> AgentSpec:
+        """Return the effective spec after trusted global defaults are merged."""
+        return apply_global_mcp_servers(spec, self._global_mcp_servers)
 
     def load(
         self,
@@ -92,6 +113,7 @@ class AgentCache:
         # Tier 2: disk cache (directory already extracted)
         if workdir.is_dir():
             spec = load_spec(workdir, expand_env=expand_env, prune_invalid_sub_agents=True)
+            spec = self._with_global_mcp_servers(spec)
             self._specs[agent_id] = spec
             return LoadedAgent(spec=spec, workdir=workdir)
 
@@ -149,14 +171,14 @@ class AgentCache:
             tmp_path.unlink()
 
         # Swap in-memory entry (atomic dict assignment)
-        self._specs[agent_id] = spec
+        self._specs[agent_id] = self._with_global_mcp_servers(spec)
 
         # Replace disk directory: remove old, rename staging into place
         if workdir.is_dir():
             shutil.rmtree(workdir)
         staging_dir.rename(workdir)
 
-        return LoadedAgent(spec=spec, workdir=workdir)
+        return LoadedAgent(spec=self._specs[agent_id], workdir=workdir)
 
     def evict(self, agent_id: str) -> None:
         """
@@ -205,5 +227,5 @@ class AgentCache:
         finally:
             tmp_path.unlink()
 
-        self._specs[agent_id] = spec
-        return LoadedAgent(spec=spec, workdir=workdir)
+        self._specs[agent_id] = self._with_global_mcp_servers(spec)
+        return LoadedAgent(spec=self._specs[agent_id], workdir=workdir)

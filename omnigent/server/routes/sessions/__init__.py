@@ -706,6 +706,7 @@ from omnigent.session_lifecycle import (
 )
 from omnigent.spec.types import (
     FunctionPolicySpec,
+    MCPServerConfig,
     Phase,
     PolicyAction,
     PolicySpec,
@@ -785,6 +786,7 @@ def create_sessions_router(
     host_registry: HostRegistry | None = None,
     project_store: ProjectStore | None = None,
     background_title_coordinator: BackgroundSessionTitleCoordinator | None = None,
+    global_mcp_servers: list[MCPServerConfig] | None = None,
 ) -> APIRouter:
     """
     Factory that builds the sessions router.
@@ -967,6 +969,7 @@ def create_sessions_router(
         auth_provider=auth_provider,
         permission_store=permission_store,
         agent_cache=agent_cache,
+        global_mcp_servers=global_mcp_servers,
     )
 
     return router

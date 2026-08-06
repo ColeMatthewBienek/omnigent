@@ -16,6 +16,7 @@ from fastapi import (
 from fastapi.responses import Response
 
 from omnigent.errors import ErrorCode, OmnigentError
+from omnigent.global_mcp import GLOBAL_MCP_SERVERS_HEADER, global_mcp_servers_header
 from omnigent.runner.routing import RunnerRouter
 from omnigent.runtime.agent_cache import AgentCache
 from omnigent.runtime.policies.approval import _ELICITATION_MODE
@@ -72,6 +73,7 @@ from omnigent.server.schemas import (
     PolicySummary,
     SkillSummary,
 )
+from omnigent.spec.types import MCPServerConfig
 from omnigent.stores import AgentStore, ConversationStore
 from omnigent.stores.artifact_store import ArtifactStore
 from omnigent.stores.permission_store import PermissionStore
@@ -87,6 +89,7 @@ def register_agent_routes(
     auth_provider: AuthProvider | None = None,
     permission_store: PermissionStore | None = None,
     agent_cache: AgentCache | None = None,
+    global_mcp_servers: list[MCPServerConfig] | None = None,
 ) -> None:
     """Register the agent sub-resource routes on router."""
 
@@ -207,6 +210,7 @@ def register_agent_routes(
                 # The runner fails safe (treats a missing header as
                 # session-scoped → no expansion).
                 "X-Agent-Session-Scoped": "true" if agent.session_id is not None else "false",
+                GLOBAL_MCP_SERVERS_HEADER: global_mcp_servers_header(global_mcp_servers or []),
             },
         )
 

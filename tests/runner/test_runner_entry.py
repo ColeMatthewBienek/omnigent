@@ -1746,6 +1746,48 @@ async def test_resolve_agent_spec_from_server_caches_success_by_agent_version(
 
 
 @pytest.mark.asyncio
+async def test_resolve_agent_spec_from_server_merges_global_mcp_servers(
+    tmp_path: Path,
+) -> None:
+    """Server-provided MCP defaults are available to every resolved agent."""
+    config_bytes = (
+        b"spec_version: 1\nname: browser-agent\nexecutor:\n"
+        b"  config:\n    harness: claude-sdk\n"
+    )
+    bundle_buf = io.BytesIO()
+    with tarfile.open(fileobj=bundle_buf, mode="w:gz") as tf:
+        info = tarfile.TarInfo(name="config.yaml")
+        info.size = len(config_bytes)
+        tf.addfile(info, io.BytesIO(config_bytes))
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            content=bundle_buf.getvalue(),
+            headers={
+                "X-Agent-Version": "1",
+                "X-Omnigent-Global-Mcp-Servers": (
+                    '[{"name":"playwright","transport":"stdio",'
+                    '"command":"playwright-mcp","args":[]}]'
+                ),
+            },
+        )
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(_handler),
+        base_url="http://server.test",
+    ) as client:
+        resolved = await _resolve_agent_spec_from_server(
+            client, tmp_path, "ag_browser", session_id="conv_test"
+        )
+
+    assert resolved is not None
+    assert [(server.name, server.command) for server in resolved.spec.mcp_servers] == [
+        ("playwright", "playwright-mcp")
+    ]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("status_code", [401, 403, 500, 502])
 async def test_resolve_agent_spec_from_server_raises_for_non_404_errors(
     tmp_path: Path,

@@ -927,6 +927,10 @@ def create_app(
     # ``ServerMcpPool.__init__`` is synchronous and safe to call outside
     # a running event loop.
     _mcp_pool = ServerMcpPool()
+    from omnigent.global_mcp import parse_global_mcp_servers
+
+    _global_mcp_servers = parse_global_mcp_servers((server_config or {}).get("global_mcp_servers"))
+    agent_cache.set_global_mcp_servers(_global_mcp_servers)
     server_metrics = ServerPerformanceMetrics()
     server_metrics_otel = ServerMetricsOtelPublisher()
 
@@ -1920,6 +1924,7 @@ def create_app(
             # files a session into a project (owner-private membership).
             project_store=project_store,
             background_title_coordinator=background_title_coordinator,
+            global_mcp_servers=_global_mcp_servers,
         ),
         prefix="/v1",
         tags=["sessions"],

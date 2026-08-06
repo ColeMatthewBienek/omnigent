@@ -252,7 +252,13 @@ RUN npm install -g --no-audit --no-fund \
       @anthropic-ai/claude-code \
       @openai/codex \
       @earendil-works/pi-coding-agent \
+      @playwright/mcp@0.0.78 \
  && npm cache clean --force
+
+# Global Playwright MCP defaults use the ``playwright-mcp`` binary. Preinstall
+# its matching Chromium so each agent session can start without a network fetch.
+RUN node /usr/local/lib/node_modules/@playwright/mcp/node_modules/playwright/cli.js \
+      install --with-deps chromium
 
 # Kiro CLI is not published as an npm package, and its installer has NO version
 # flag — `curl …/install | bash` always fetches `latest`, so the image was
