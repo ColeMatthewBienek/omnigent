@@ -681,7 +681,7 @@ async def _file_into_project(deps: FireDeps, task: ScheduledTask, conversation_i
             local_single_user=deps.local_single_user,
         )
         project = await asyncio.to_thread(
-            deps.project_store.get, task.project_id, owner_user_id=project_owner
+            deps.project_store.get, task.project_id, user_id=project_owner
         )
         if project is None:
             _logger.warning(

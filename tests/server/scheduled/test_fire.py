@@ -200,7 +200,7 @@ class FakeHostRegistry:
 
 
 class FakeProjectStore:
-    """Serves ``get`` from ``{project_id: owner_user_id}``, exactly like the
+    """Serves ``get`` from ``{project_id: user_id}``, exactly like the
     real :class:`ProjectStore`: a project owned by someone else (or by a
     different owner scope, e.g. ``None`` vs ``"local"``) is treated as not
     found, not just a missing id."""
@@ -209,11 +209,11 @@ class FakeProjectStore:
         self.existing = existing or {}
         self.gets: list[tuple[str, str | None]] = []
 
-    def get(self, project_id: str, *, owner_user_id: str | None) -> object | None:
-        self.gets.append((project_id, owner_user_id))
+    def get(self, project_id: str, *, user_id: str | None) -> object | None:
+        self.gets.append((project_id, user_id))
         if project_id not in self.existing:
             return None
-        if self.existing[project_id] != owner_user_id:
+        if self.existing[project_id] != user_id:
             return None
         return object()
 

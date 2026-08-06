@@ -412,7 +412,7 @@ async def test_update_heal_lookup_failure_does_not_break_the_patch(
     """
 
     class _RaisingProjectStore(SqlAlchemyProjectStore):
-        def get(self, project_id: str, *, owner_user_id: str | None) -> None:
+        def get(self, project_id: str, *, user_id: str | None) -> None:
             raise RuntimeError("transient project-store failure")
 
     project_id = uuid.uuid4().hex

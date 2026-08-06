@@ -330,7 +330,7 @@ def create_scheduled_tasks_router(
                 code=ErrorCode.INVALID_INPUT,
             )
         project_owner = resolve_project_owner(owner, local_single_user=_local_single_user)
-        owned = await asyncio.to_thread(project_store.get, project_id, owner_user_id=project_owner)
+        owned = await asyncio.to_thread(project_store.get, project_id, user_id=project_owner)
         if owned is None:
             raise OmnigentError("Project not found", code=ErrorCode.NOT_FOUND)
         return encode_scheduled_task_project_owner(project_owner)
@@ -367,7 +367,7 @@ def create_scheduled_tasks_router(
         try:
             project_owner = resolve_project_owner(owner, local_single_user=_local_single_user)
             owned = await asyncio.to_thread(
-                project_store.get, project_id, owner_user_id=project_owner
+                project_store.get, project_id, user_id=project_owner
             )
         except Exception:
             _logger.exception(
