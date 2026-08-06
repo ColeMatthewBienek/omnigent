@@ -109,3 +109,8 @@ lint-ts:
 [group('lint')]
 normalize-locks: _ensure-uv
     uv run scripts/normalize_uv_lock_registry.py uv.lock || true
+
+# --- Fork maintenance ---
+
+update-from-upstream *args:
+    exec scripts/update-from-upstream.sh {{args}}

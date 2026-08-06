@@ -100,6 +100,17 @@ uv run --no-sync pyrefly check     # Python type checking (core and client SDK)
 uv run pre-commit run --all-files
 ```
 
+### Updating this fork from upstream
+
+Run `scripts/update-from-upstream.sh` from the fork branch to merge `origin/main`
+safely. It first creates a timestamped `polly-backup-*` branch and matching tag,
+then requires exactly one Alembic head and runs the scheduled-task seam tests.
+If the merge conflicts, resolve it manually and run
+`scripts/update-from-upstream.sh --check-only`; duplicate migration IDs should be
+renumbered locally. `just update-from-upstream` is a thin wrapper, but requires
+just 1.27+ because this justfile uses group attributes; use the script directly
+with older just versions.
+
 When touching `web/`:
 
 ```bash
