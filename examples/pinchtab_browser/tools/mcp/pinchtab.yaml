@@ -1,0 +1,26 @@
+# PinchTab MCP server — local Chrome control via accessibility-tree snapshots.
+# Auto-discovered by omnigent (omnigent/spec/parser.py:_discover_mcp_servers);
+# no need to reference it from config.yaml.
+#
+# Exposed tools are namespaced pinchtab_* (pinchtab_navigate, pinchtab_snapshot,
+# pinchtab_click, pinchtab_type, …), so they never shadow omnigent's
+# framework-owned browser_* built-ins.
+name: pinchtab
+description: Local Chrome control (navigate, snapshot, click, type) via the PinchTab MCP server.
+transport: stdio
+
+# `pinchtab mcp` is PinchTab's own stdio MCP bridge. It talks to the PinchTab
+# daemon over HTTP; it does not launch Chrome itself. Start the daemon first —
+# see the bundle README.
+command: pinchtab
+args:
+  - mcp
+
+env:
+  # PinchTab binds to 127.0.0.1 by default and its HTTP API is not built for
+  # untrusted or multi-tenant exposure. Keep this loopback-only.
+  PINCHTAB_SERVER: http://127.0.0.1:9867
+  # Bearer token minted by `pinchtab config init`; read it with
+  # `pinchtab config token`. Sourced from the environment so no credential
+  # lands in the repo. Parsing fails loud if the variable is unset.
+  PINCHTAB_TOKEN: ${PINCHTAB_TOKEN}
