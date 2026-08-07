@@ -69,8 +69,15 @@ if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   exit 2
 fi
 
-# Alembic defaults to a repo-local SQLite database unless this is set explicitly.
-OMNIGENT_DB_URL="${OMNIGENT_DB_URL:-sqlite:///$HOME/.omnigent/chat.db}"
+# A custom local SQLite URL determines both the guarded and backed-up database path.
+if [[ -z "${OMNIGENT_DB_URL:-}" ]]; then
+  OMNIGENT_DB_PATH="$HOME/.omnigent/chat.db"
+  OMNIGENT_DB_URL="sqlite:///$OMNIGENT_DB_PATH"
+elif [[ "$OMNIGENT_DB_URL" == sqlite:///* ]]; then
+  OMNIGENT_DB_PATH="${OMNIGENT_DB_URL#sqlite:///}"
+else
+  OMNIGENT_DB_PATH=""
+fi
 export OMNIGENT_DB_URL
 
 run_alembic_single_head_guard() {
@@ -101,6 +108,14 @@ run_alembic_database_drift_guard() {
   local alembic_current_output alembic_heads_output current_revisions head_revisions
 
   banner "Alembic database drift guard"
+  if [[ -z "$OMNIGENT_DB_PATH" ]]; then
+    notice "OMNIGENT_DB_URL is not a local SQLite URL; skipping database migration drift check."
+    return 0
+  fi
+  if [[ ! -f "$OMNIGENT_DB_PATH" ]]; then
+    notice "No database found at $OMNIGENT_DB_PATH; skipping database migration drift check."
+    return 0
+  fi
   if ! alembic_heads_output=$(uv run alembic -c omnigent/db/alembic.ini heads 2>&1); then
     printf '%s\n' "$alembic_heads_output"
     fail "Alembic heads could not be inspected for database drift."
@@ -112,7 +127,7 @@ run_alembic_database_drift_guard() {
     return 1
   fi
 
-  head_revisions=$(awk '/\\(head\\)/ {print $1}' <<<"$alembic_heads_output" | sort)
+  head_revisions=$(awk '/\(head\)/ {print $1}' <<<"$alembic_heads_output" | sort)
   current_revisions=$(awk 'NF == 1 || (NF == 2 && $2 == "(head)") {print $1}' <<<"$alembic_current_output" | sort)
 
   printf 'Alembic heads: %s\n' "${head_revisions:-<none>}"
@@ -180,30 +195,31 @@ else
 fi
 
 backup_database() {
-  local database_backup_path database_path
+  local database_backup_path
 
-  database_path="$HOME/.omnigent/chat.db"
-  if [[ ! -f "$database_path" ]]; then
-    notice "No database found at $database_path; skipping database safety backup."
+  if [[ -z "$OMNIGENT_DB_PATH" ]]; then
+    notice "OMNIGENT_DB_URL is not a local SQLite URL; skipping database safety backup."
+    return 0
+  fi
+  if [[ ! -f "$OMNIGENT_DB_PATH" ]]; then
+    notice "No database found at $OMNIGENT_DB_PATH; skipping database safety backup."
     return 0
   fi
 
-  database_backup_path="$HOME/.omnigent/chat.db.bak-update-$(date -u +%Y%m%dT%H%M%SZ)"
-  cp "$database_path" "$database_backup_path"
-  if [[ -f "$database_path-wal" ]]; then
-    cp "$database_path-wal" "$database_backup_path-wal"
-  fi
-  if [[ -f "$database_path-shm" ]]; then
-    cp "$database_path-shm" "$database_backup_path-shm"
+  database_backup_path="$OMNIGENT_DB_PATH.bak-update-$update_timestamp"
+  if ! uv run python -c 'import sqlite3,sys; src=sqlite3.connect(sys.argv[1]); dst=sqlite3.connect(sys.argv[2]); src.backup(dst); dst.close(); src.close()' "$OMNIGENT_DB_PATH" "$database_backup_path"; then
+    fail "Database backup could not be created."
+    return 1
   fi
 
   printf '%s\n' \
     "Created database backup $database_backup_path." \
-    "To restore (with the server stopped): cp $database_backup_path $database_path" \
-    "Also restore $database_backup_path-wal and $database_backup_path-shm if they were created."
+    "To restore (with the server stopped): cp $database_backup_path $OMNIGENT_DB_PATH" \
+    "Then delete stale sidecars: rm -f $OMNIGENT_DB_PATH-wal $OMNIGENT_DB_PATH-shm"
 }
 
-backup_name="polly-backup-$(date -u +%Y%m%dT%H%M%SZ)"
+update_timestamp=$(date -u +%Y%m%dT%H%M%SZ)
+backup_name="polly-backup-$update_timestamp"
 backup_tag="${backup_name}-tag"
 banner "Database safety backup"
 backup_database
