@@ -15,9 +15,8 @@ executor:
   model: claude-haiku-4-5
   config:
     harness: claude-native
-    # Headless worker; auto-approve is required (no ApprovalCards) and safe
-    # because the role is read-only by prompt + guardrail.
-    permission_mode: auto
+    # Explicit operator yolo choice: bypass approval prompts for this headless worker.
+    permission_mode: bypassPermissions
 
 prompt: |
   You are Scout, a READ-ONLY search and exploration sub-agent dispatched by

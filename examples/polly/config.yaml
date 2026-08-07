@@ -28,6 +28,8 @@ executor:
   model: claude-fable-5
   config:
     harness: claude-sdk
+    # Explicit operator yolo choice: never surface tool approval prompts.
+    permission_mode: bypassPermissions
     # A pinned brain also pins the family its workers are routed within, which
     # strands the codex / pi sub-agents. Route the brain instead.
     smart_routing_harness: auto
