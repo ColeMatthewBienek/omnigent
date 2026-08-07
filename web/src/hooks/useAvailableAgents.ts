@@ -6,6 +6,7 @@ import {
   nativeCodingAgentForAvailableAgent,
   nativeCodingAgentForAgentName,
   nativeCodingAgentForHarness,
+  isCanonicalNativeWrapper,
 } from "@/lib/nativeCodingAgents";
 
 export interface AvailableAgent {
@@ -252,17 +253,15 @@ export async function prefetchAvailableAgentDetails(
               skills: json.skills ?? [],
             },
       );
-      // If enrichment reveals this agent is a native coding agent (e.g. a
-      // kiro-native session with a non-canonical name), remove it when a
-      // seeded built-in with the same native key already exists so it doesn't
-      // surface as a duplicate picker row.
+      // Only a canonical launcher wrapper is a native shadow. Custom agents
+      // can run native harnesses without duplicating the wrapper's picker row.
       const enrichedAgent = enriched.find((a) => a.id === agent.id);
-      const enrichedKey = enrichedAgent
-        ? nativeCodingAgentForAvailableAgent(enrichedAgent)?.key
-        : undefined;
-      if (enrichedKey) {
+      const enrichedNativeAgent = nativeCodingAgentForAvailableAgent(enrichedAgent);
+      if (enrichedNativeAgent && isCanonicalNativeWrapper(enrichedAgent)) {
         const builtinExists = enriched.some(
-          (a) => a.id !== agent.id && nativeCodingAgentForAvailableAgent(a)?.key === enrichedKey,
+          (a) =>
+            a.id !== agent.id &&
+            nativeCodingAgentForAvailableAgent(a)?.key === enrichedNativeAgent.key,
         );
         if (builtinExists) return enriched.filter((a) => a.id !== agent.id);
       }

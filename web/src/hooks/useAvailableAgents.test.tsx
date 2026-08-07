@@ -3,7 +3,11 @@ import { cleanup, renderHook, waitFor } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { useAvailableAgents, prefetchAvailableAgentDetails } from "./useAvailableAgents";
+import {
+  useAvailableAgents,
+  prefetchAvailableAgentDetails,
+  type AvailableAgent,
+} from "./useAvailableAgents";
 
 // The hook unions the built-in agent list from GET /v1/agents with
 // custom agents discovered on the caller's sessions via
@@ -858,44 +862,79 @@ describe("prefetchAvailableAgentDetails", () => {
     expect(queryClient.getQueryData(["available-agents"])).toEqual([agent]);
   });
 
-  it("removes a session agent when enrichment reveals it is a native shadow", async () => {
-    // A session bound a kiro agent with a non-canonical name ("kiro-naitive"
-    // typo). On initial load harness is null so it passes the kiro filter.
-    // prefetchAvailableAgentDetails detects harness: "kiro-native" after
-    // enrichment and removes the agent since a seeded kiro built-in exists.
+  it("removes a session agent when enrichment reveals an exact native wrapper shadow", async () => {
+    // The session row starts without a harness, then enrichment confirms it is
+    // a duplicate of the canonical Codex launcher wrapper.
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    const kiroBuiltin = {
-      id: "ag_kiro",
-      name: "kiro-native-ui",
-      display_name: "Kiro",
+    const codexBuiltin = {
+      id: "ag_codex",
+      name: "codex-native-ui",
+      display_name: "Codex",
       description: null,
-      harness: "kiro-native",
+      harness: "codex-native",
       skills: [],
     };
-    const kiroShadow = {
-      id: "ag_session_kiro",
-      name: "kiro-naitive",
-      display_name: "Kiro-naitive",
+    const codexShadow = {
+      id: "ag_session_codex",
+      name: "codex-native-ui",
+      display_name: "Codex",
       description: null,
       harness: null,
       skills: [],
-      sessionId: "conv_kiro",
+      sessionId: "conv_codex",
     };
-    queryClient.setQueryData(["available-agents"], [kiroBuiltin, kiroShadow]);
+    queryClient.setQueryData(["available-agents"], [codexBuiltin, codexShadow]);
 
     fetchMock.mockResolvedValueOnce(
       mockResponse({
-        id: "ag_session_kiro",
+        id: "ag_session_codex",
         object: "agent",
-        name: "kiro-naitive",
-        harness: "kiro-native",
+        name: "codex-native-ui",
+        harness: "codex-native",
         skills: [],
       }),
     );
 
-    await prefetchAvailableAgentDetails(kiroShadow, queryClient);
+    await prefetchAvailableAgentDetails(codexShadow, queryClient);
 
-    // Shadow removed; only the seeded built-in remains.
-    expect(queryClient.getQueryData(["available-agents"])).toEqual([kiroBuiltin]);
+    expect(queryClient.getQueryData(["available-agents"])).toEqual([codexBuiltin]);
+  });
+
+  it("keeps a custom native-harness session agent after enrichment", async () => {
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const codexBuiltin = {
+      id: "ag_codex",
+      name: "codex-native-ui",
+      display_name: "Codex",
+      description: null,
+      harness: "codex-native",
+      skills: [],
+    };
+    const codexMem = {
+      id: "ag_codex_mem",
+      name: "codex-mem",
+      display_name: "Codex-mem",
+      description: null,
+      harness: null,
+      skills: [],
+      sessionId: "conv_codex_mem",
+    };
+    queryClient.setQueryData(["available-agents"], [codexBuiltin, codexMem]);
+
+    fetchMock.mockResolvedValueOnce(
+      mockResponse({
+        id: "ag_codex_mem",
+        object: "agent",
+        name: "codex-mem",
+        harness: "codex-native",
+        skills: [],
+      }),
+    );
+
+    await prefetchAvailableAgentDetails(codexMem, queryClient);
+
+    const available = queryClient.getQueryData<AvailableAgent[]>(["available-agents"]);
+    expect(available?.filter((agent) => agent.name === "codex-mem")).toHaveLength(1);
+    expect(available).toEqual([codexBuiltin, { ...codexMem, harness: "codex-native" }]);
   });
 });

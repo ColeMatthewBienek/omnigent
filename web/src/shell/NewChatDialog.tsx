@@ -111,7 +111,6 @@ import {
 import { readLastHarness, writeLastHarness } from "@/lib/harnessPreferences";
 import { readHideUnconfiguredHarnesses } from "@/lib/harnessVisibilityPreferences";
 import { readDefaultBaseBranch } from "@/lib/baseBranchPreferences";
-import { agentRootName } from "@/lib/forkHarness";
 import { readHarnessOptions, writeHarnessOption } from "@/lib/modePreferences";
 import {
   AUTO_HARNESS_DESCRIPTION,
@@ -134,6 +133,7 @@ import { partitionAgentsByKind, sortAgentsForDisplay } from "@/lib/agentGrouping
 import { cn } from "@/lib/utils";
 import {
   isFullySupportedNativeCodingAgent,
+  isCanonicalNativeWrapper,
   isNativeCodingAgent,
   isRecentHarness,
   nativeAgentHasCapability,
@@ -1792,11 +1792,6 @@ interface LandingDraft {
 }
 
 let landingDraft: LandingDraft | null = null;
-
-function isCanonicalNativeWrapper(agent: AvailableAgent): boolean {
-  const nativeAgent = nativeCodingAgentForAvailableAgent(agent);
-  return nativeAgent !== undefined && agentRootName(agent.name) === nativeAgent.agentName;
-}
 
 // Test-only: clears the preserved landing draft so each case starts from a
 // clean module state (the draft is module-scoped and survives unmount by

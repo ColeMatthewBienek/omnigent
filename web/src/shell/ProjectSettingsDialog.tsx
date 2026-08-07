@@ -39,7 +39,7 @@ import { sortAgentsForDisplay } from "@/lib/agentGrouping";
 import { sandboxOptionLabel } from "@/lib/capabilities";
 import { useServerInfo } from "@/lib/CapabilitiesContext";
 import { SANDBOX_HOST_CHOICE } from "@/lib/hostPreferences";
-import { isNativeCodingAgent } from "@/lib/nativeCodingAgents";
+import { isCanonicalNativeWrapper } from "@/lib/nativeCodingAgents";
 import type { ProjectConfig } from "@/lib/projectsApi";
 import { shouldGuardDialogDismiss } from "@/lib/dialogDismissGuard";
 import { AgentHarnessPicker } from "./NewChatDialog";
@@ -218,11 +218,14 @@ export function ProjectSettingsDialog({
   const browsableHostId =
     hostId !== NONE && hostId !== SANDBOX_HOST_CHOICE && !storedHostMissing ? hostId : null;
 
-  // Agent picker groups, mirroring the composer's split (native harness CLIs vs
-  // SDK / bundle agents). The picker takes both lists and a selection.
+  // Agent picker groups, mirroring the composer's split (canonical native CLI
+  // wrappers vs SDK / bundle agents). The picker takes both lists and a selection.
   const agentList = useMemo(() => sortAgentsForDisplay(agents ?? []), [agents]);
-  const harnessEntries = useMemo(() => agentList.filter(isNativeCodingAgent), [agentList]);
-  const agentEntries = useMemo(() => agentList.filter((a) => !isNativeCodingAgent(a)), [agentList]);
+  const harnessEntries = useMemo(() => agentList.filter(isCanonicalNativeWrapper), [agentList]);
+  const agentEntries = useMemo(
+    () => agentList.filter((a) => !isCanonicalNativeWrapper(a)),
+    [agentList],
+  );
   const selectedAgent = agentList.find((a) => a.id === agentId) ?? null;
   const agentLabel = selectedAgent ? selectedAgent.display_name : "No default";
   // The host the agent picker's readiness badges check against (its config

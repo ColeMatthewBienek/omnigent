@@ -1,4 +1,5 @@
 import type { AvailableAgent } from "@/hooks/useAvailableAgents";
+import { agentRootName } from "@/lib/forkHarness";
 
 export const WRAPPER_LABEL_KEY = "omnigent.wrapper";
 export const UI_MODE_LABEL_KEY = "omnigent.ui";
@@ -247,6 +248,18 @@ export function nativeCodingAgentForAvailableAgent(
 ): NativeCodingAgentSpec | undefined {
   if (agent == null) return undefined;
   return nativeCodingAgentForHarness(agent.harness) ?? nativeCodingAgentForAgentName(agent.name);
+}
+
+/** Whether an agent row is the canonical launcher wrapper for a native CLI. */
+export function isCanonicalNativeWrapper(
+  agent: Pick<AvailableAgent, "name" | "harness"> | null | undefined,
+): boolean {
+  const nativeAgent = nativeCodingAgentForAvailableAgent(agent);
+  return (
+    nativeAgent !== undefined &&
+    agent != null &&
+    agentRootName(agent.name) === nativeAgent.agentName
+  );
 }
 
 export function isNativeCodingAgent(
