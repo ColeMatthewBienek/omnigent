@@ -18,14 +18,14 @@ spawn: true
 # Orchestrator "brain": Claude Agent SDK. polly writes no code itself — it
 # delegates ALL coding work (investigation, implementation, review) to the
 # claude_code / codex sub-agents, doing only non-code authoring (docs /
-# Markdown / text edits, skills) itself. Pinned to claude-opus-4-8 (see
+# Markdown / text edits, skills) itself. Pinned to claude-fable-5 (see
 # sys_list_models' "self"/"claude_code" curated alias catalog) so polly's
 # own brain always runs that model regardless of the logged-in plan's
 # default.
 executor:
   type: omnigent
   context_window: 1000000
-  model: claude-opus-4-8
+  model: claude-fable-5
   config:
     harness: claude-sdk
     # A pinned brain also pins the family its workers are routed within, which
