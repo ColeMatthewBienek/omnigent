@@ -25,7 +25,8 @@ Options:
   --allow-dirty  Permit a dirty tree for a normal update. Never commits WIP.
   -h, --help     Show this help text.
 
-The normal update creates a timestamped branch and tag backup before fetching.
+The normal update snapshots the local database and creates a timestamped branch
+and tag backup before fetching.
 If a merge conflicts, resolve it manually, then rerun with --check-only.
 EOF
 }
@@ -36,6 +37,10 @@ banner() {
 
 fail() {
   printf 'FAIL: %s\n' "$1" >&2
+}
+
+notice() {
+  printf 'NOTICE: %s\n' "$1"
 }
 
 while (($# > 0)); do
@@ -64,6 +69,10 @@ if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   exit 2
 fi
 
+# Alembic defaults to a repo-local SQLite database unless this is set explicitly.
+OMNIGENT_DB_URL="${OMNIGENT_DB_URL:-sqlite:///$HOME/.omnigent/chat.db}"
+export OMNIGENT_DB_URL
+
 run_alembic_single_head_guard() {
   local alembic_output head_count
 
@@ -88,6 +97,37 @@ run_alembic_single_head_guard() {
   printf 'PASS: exactly one Alembic head detected.\n'
 }
 
+run_alembic_database_drift_guard() {
+  local alembic_current_output alembic_heads_output current_revisions head_revisions
+
+  banner "Alembic database drift guard"
+  if ! alembic_heads_output=$(uv run alembic -c omnigent/db/alembic.ini heads 2>&1); then
+    printf '%s\n' "$alembic_heads_output"
+    fail "Alembic heads could not be inspected for database drift."
+    return 1
+  fi
+  if ! alembic_current_output=$(uv run alembic -c omnigent/db/alembic.ini current 2>&1); then
+    printf '%s\n' "$alembic_current_output"
+    fail "Alembic current revision could not be inspected for database drift."
+    return 1
+  fi
+
+  head_revisions=$(awk '/\\(head\\)/ {print $1}' <<<"$alembic_heads_output" | sort)
+  current_revisions=$(awk 'NF == 1 || (NF == 2 && $2 == "(head)") {print $1}' <<<"$alembic_current_output" | sort)
+
+  printf 'Alembic heads: %s\n' "${head_revisions:-<none>}"
+  printf 'Database current revision: %s\n' "${current_revisions:-<none>}"
+  if [[ "$current_revisions" != "$head_revisions" ]]; then
+    printf '%s\n' \
+      'WARNING: DATABASE MIGRATION DRIFT DETECTED' \
+      'The configured database is not stamped at the Alembic head. Pending migrations may exist.' \
+      'No migrations were run by this script; restart the omnigent server or run the approved migration workflow.' >&2
+    return 0
+  fi
+
+  printf 'PASS: database revision matches the Alembic head.\n'
+}
+
 run_scheduled_task_tests() {
   banner "Scheduled-task seam tests"
   if uv run pytest -q -p no:cacheprovider "${SCHEDULED_TASK_TESTS[@]}"; then
@@ -103,6 +143,7 @@ run_post_merge_checks() {
 
   banner "Post-merge checks"
   run_alembic_single_head_guard || checks_failed=true
+  run_alembic_database_drift_guard || checks_failed=true
   run_scheduled_task_tests || checks_failed=true
 
   if [[ "$checks_failed" == true ]]; then
@@ -138,8 +179,34 @@ else
   printf 'PASS: working tree is clean.\n'
 fi
 
+backup_database() {
+  local database_backup_path database_path
+
+  database_path="$HOME/.omnigent/chat.db"
+  if [[ ! -f "$database_path" ]]; then
+    notice "No database found at $database_path; skipping database safety backup."
+    return 0
+  fi
+
+  database_backup_path="$HOME/.omnigent/chat.db.bak-update-$(date -u +%Y%m%dT%H%M%SZ)"
+  cp "$database_path" "$database_backup_path"
+  if [[ -f "$database_path-wal" ]]; then
+    cp "$database_path-wal" "$database_backup_path-wal"
+  fi
+  if [[ -f "$database_path-shm" ]]; then
+    cp "$database_path-shm" "$database_backup_path-shm"
+  fi
+
+  printf '%s\n' \
+    "Created database backup $database_backup_path." \
+    "To restore (with the server stopped): cp $database_backup_path $database_path" \
+    "Also restore $database_backup_path-wal and $database_backup_path-shm if they were created."
+}
+
 backup_name="polly-backup-$(date -u +%Y%m%dT%H%M%SZ)"
 backup_tag="${backup_name}-tag"
+banner "Database safety backup"
+backup_database
 banner "Safety backup"
 git branch "$backup_name" HEAD
 git tag "$backup_tag" HEAD
