@@ -412,6 +412,8 @@ describe("useAvailableAgents", () => {
             harness: "claude-native",
           },
           { id: "ag_claude", name: "claude-native-ui", harness: "claude-native" },
+          // A non-wrapper name on a native harness is a custom agent and
+          // must no longer be collapsed into the Kiro launcher wrapper.
           { id: "ag_stale_kiro", name: "kiro-naitive", harness: "kiro-native" },
           { id: "ag_kiro", name: "kiro-native-ui", harness: "kiro-native" },
         ],
@@ -436,10 +438,9 @@ describe("useAvailableAgents", () => {
     const { result } = renderHook(() => useAvailableAgents(), { wrapper });
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
 
-    // ag_session_kiro appears on initial load with harness: null because
-    // enrichment is deferred. prefetchAvailableAgentDetails (called on picker
-    // open) would later detect harness: "kiro-native" and remove the duplicate.
-    // ag_legacy_kiro is filtered by kiroLegacyNames (name: "kiro").
+    // The custom Kiro row remains distinct from the canonical Kiro wrapper.
+    // Its same-named session is shadowed by the catalog row; ag_legacy_kiro
+    // remains filtered by kiroLegacyNames (name: "kiro").
     expect(result.current.data).toEqual([
       {
         id: "ag_codex",
@@ -458,6 +459,14 @@ describe("useAvailableAgents", () => {
         skills: [],
       },
       {
+        id: "ag_stale_kiro",
+        name: "kiro-naitive",
+        display_name: "Kiro-naitive",
+        description: null,
+        harness: "kiro-native",
+        skills: [],
+      },
+      {
         id: "ag_kiro",
         name: "kiro-native-ui",
         display_name: "Kiro",
@@ -465,13 +474,61 @@ describe("useAvailableAgents", () => {
         harness: "kiro-native",
         skills: [],
       },
+    ]);
+  });
+
+  it("keeps custom native-harness agents while deduping canonical wrapper rows", async () => {
+    routeFetch({
+      [BUILTINS_URL]: mockResponse({
+        object: "list",
+        data: [
+          // This is a custom agent, not the Codex launcher wrapper. Its
+          // native harness must not cause it to collapse into the wrapper.
+          { id: "ag_codex_mem", name: "codex-mem", harness: "codex-native" },
+          // Forked and duplicate canonical wrappers still resolve to one
+          // launcher entry, with the literal wrapper name winning the tie.
+          {
+            id: "ag_codex_fork",
+            name: "codex-native-ui (fork ag_old)",
+            harness: "codex-native",
+          },
+          { id: "ag_codex", name: "codex-native-ui", harness: "codex-native" },
+          { id: "ag_codex_duplicate", name: "codex-native-ui", harness: "codex-native" },
+          // Pi's harness is native too, but a non-wrapper name remains a
+          // distinct custom agent rather than being collapsed by harness.
+          { id: "ag_pi_helper", name: "pi-helper", harness: "pi-native" },
+        ],
+        has_more: false,
+      }),
+      [SCAN_URL]: EMPTY_SCAN,
+    });
+
+    const { result } = renderHook(() => useAvailableAgents(), { wrapper });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+
+    expect(result.current.data).toEqual([
       {
-        id: "ag_session_kiro",
-        name: "kiro-naitive",
-        display_name: "Kiro-naitive",
+        id: "ag_codex_mem",
+        name: "codex-mem",
+        display_name: "Codex-mem",
         description: null,
-        harness: null,
-        sessionId: "conv_kiro",
+        harness: "codex-native",
+        skills: [],
+      },
+      {
+        id: "ag_codex",
+        name: "codex-native-ui",
+        display_name: "Codex",
+        description: null,
+        harness: "codex-native",
+        skills: [],
+      },
+      {
+        id: "ag_pi_helper",
+        name: "pi-helper",
+        display_name: "Pi-helper",
+        description: null,
+        harness: "pi-native",
         skills: [],
       },
     ]);

@@ -53,10 +53,13 @@ const DISPLAY_NAMES: Record<string, string> = {
 };
 
 function displayNameForAgent(name: string, harness?: string | null): string {
+  const nativeAgentForHarness = nativeCodingAgentForHarness(harness);
   return (
-    nativeCodingAgentForHarness(harness)?.displayName ??
     nativeCodingAgentForAgentName(name)?.displayName ??
     DISPLAY_NAMES[name] ??
+    (agentRootName(name) === nativeAgentForHarness?.agentName
+      ? nativeAgentForHarness.displayName
+      : undefined) ??
     capitalizeAgentName(name)
   );
 }
@@ -66,7 +69,7 @@ function dedupeNativeAgents(agents: AvailableAgent[]): AvailableAgent[] {
   const nativeIndex = new Map<string, number>();
   for (const agent of agents) {
     const nativeAgent = nativeCodingAgentForAvailableAgent(agent);
-    if (nativeAgent === undefined) {
+    if (nativeAgent === undefined || agentRootName(agent.name) !== nativeAgent.agentName) {
       result.push(agent);
       continue;
     }

@@ -111,6 +111,7 @@ import {
 import { readLastHarness, writeLastHarness } from "@/lib/harnessPreferences";
 import { readHideUnconfiguredHarnesses } from "@/lib/harnessVisibilityPreferences";
 import { readDefaultBaseBranch } from "@/lib/baseBranchPreferences";
+import { agentRootName } from "@/lib/forkHarness";
 import { readHarnessOptions, writeHarnessOption } from "@/lib/modePreferences";
 import {
   AUTO_HARNESS_DESCRIPTION,
@@ -1792,6 +1793,11 @@ interface LandingDraft {
 
 let landingDraft: LandingDraft | null = null;
 
+function isCanonicalNativeWrapper(agent: AvailableAgent): boolean {
+  const nativeAgent = nativeCodingAgentForAvailableAgent(agent);
+  return nativeAgent !== undefined && agentRootName(agent.name) === nativeAgent.agentName;
+}
+
 // Test-only: clears the preserved landing draft so each case starts from a
 // clean module state (the draft is module-scoped and survives unmount by
 // design, which would otherwise leak between tests).
@@ -1815,16 +1821,16 @@ export function NewChatLandingScreen() {
     [agents],
   );
 
-  // Split the picker into "Harnesses" (the native terminal CLIs) and
-  // "Agents" (SDK / bundle agents like Polly & Debby plus any custom
-  // user-registered agents). This is the isNativeCodingAgent split, NOT the
-  // builtins/customs split: Polly & Debby are built-ins but belong under
-  // "Agents", not "Harnesses".
-  const harnessEntries = useMemo(
-    () => agentList.filter((a) => isNativeCodingAgent(a)),
+  // Split the picker into "Harnesses" (the canonical native terminal CLI
+  // wrappers) and "Agents" (SDK / bundle agents like Polly & Debby plus any
+  // custom user-registered agents). A custom agent can run a native harness
+  // without being the launcher wrapper, so classify by canonical wrapper name
+  // rather than harness alone.
+  const harnessEntries = useMemo(() => agentList.filter(isCanonicalNativeWrapper), [agentList]);
+  const agentEntries = useMemo(
+    () => agentList.filter((a) => !isCanonicalNativeWrapper(a)),
     [agentList],
   );
-  const agentEntries = useMemo(() => agentList.filter((a) => !isNativeCodingAgent(a)), [agentList]);
 
   // "Create custom agent" dialog state and pending bundle. When the user
   // creates a custom agent via the dialog, the bundle input is stored

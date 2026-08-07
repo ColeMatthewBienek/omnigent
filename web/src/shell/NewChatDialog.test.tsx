@@ -983,6 +983,42 @@ describe("NewChatLandingScreen", () => {
     ).toBeTruthy();
   });
 
+  it("groups custom native-harness agents under Custom agents", async () => {
+    const restoreViewport = forceMobileViewport();
+    try {
+      mockAgents([
+        {
+          id: "a_codex",
+          name: "codex-native-ui",
+          display_name: "Codex",
+          description: null,
+          harness: "codex-native",
+          skills: [],
+        },
+        {
+          id: "a_codex_mem",
+          name: "codex-mem",
+          display_name: "Codex-mem",
+          description: null,
+          harness: "codex-native",
+          skills: [],
+        },
+      ]);
+      renderLanding();
+      fireEvent.pointerDown(screen.getByTestId("new-chat-landing-agent-select"), { button: 0 });
+
+      // The canonical wrapper stays in Harnesses while codex-mem is not
+      // rendered inline with it.
+      expect(screen.getByTestId("new-chat-landing-agent-a_codex")).toBeTruthy();
+      expect(screen.queryByTestId("new-chat-landing-agent-a_codex_mem")).toBeNull();
+
+      fireEvent.click(screen.getByTestId("new-chat-landing-custom-agents"));
+      expect(await screen.findByTestId("new-chat-landing-agent-a_codex_mem")).toBeTruthy();
+    } finally {
+      restoreViewport();
+    }
+  });
+
   it("pins a not-fully-supported harness inline once it is the selected pick", () => {
     // Pi isn't fully supported, so a fresh picker never leads with it — but
     // selecting it must pin it inline so the active pick is never buried.
