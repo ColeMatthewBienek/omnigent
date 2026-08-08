@@ -22,7 +22,12 @@ import sqlalchemy as sa
 from alembic import op
 
 revision: str = "f7a8b9c0d1e2"
-down_revision: str | None = "e6f7a8b9c0d1"
+# FORK RE-CHAIN: upstream revises e6f7a8b9c0d1; re-parented onto the local
+# scheduled-task chain head (e2b9c5f18a3d) so the fork's migration history
+# stays single-headed and live DBs stamped at e2b9c5f18a3d apply this on the
+# next upgrade. Operations touch only session_permissions - order-independent
+# of the scheduled_tasks chain.
+down_revision: str | None = "e2b9c5f18a3d"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
