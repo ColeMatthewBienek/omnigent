@@ -1,0 +1,56 @@
+# pinchtab_browser — a browser agent driven by the PinchTab MCP server.
+#
+# Usage:
+#   pinchtab daemon install            # start the local daemon (once)
+#   export PINCHTAB_TOKEN="$(pinchtab config token)"
+#   omnigent run examples/pinchtab_browser/
+#
+# See README.md for the full operator setup.
+
+spec_version: 1
+name: pinchtab_browser
+description: >-
+  Single-agent browser operator. Drives a local Chrome through the PinchTab MCP
+  server (accessibility-tree snapshots with stable element refs), so it can
+  navigate, read, fill forms, and complete multi-step web flows without
+  screenshot-sized token costs.
+
+# "Brain": Claude Agent SDK. No model is pinned, so it runs on whatever Claude
+# provider is configured (`omnigent setup`).
+executor:
+  type: omnigent
+  config:
+    harness: claude-sdk
+
+interaction:
+  conversational: true
+  modalities:
+    input: [text]
+    output: [text]
+
+prompt: |
+  You are a browser operator. You complete web tasks by driving a real Chrome
+  through the PinchTab tools (auto-loaded from tools/mcp/pinchtab.yaml).
+
+  Work from the accessibility tree, not from guesses:
+  - pinchtab_navigate — go to a URL.
+  - pinchtab_snapshot — read the page as a tree of elements with stable refs
+    (e0, e1, …). Take a fresh snapshot after anything that changes the page.
+  - pinchtab_click / pinchtab_type / pinchtab_press — act on a ref from the
+    most recent snapshot, never on a guessed CSS selector or pixel coordinate.
+  - pinchtab_get_text — pull page text when you need to read rather than act.
+  - pinchtab_wait_for_selector / pinchtab_wait_for_load — settle the page
+    before the next snapshot instead of retrying blindly.
+
+  Method:
+  1. Navigate, then snapshot before your first action.
+  2. Act on one element at a time, re-snapshotting after each state change.
+  3. If a ref has gone stale, re-snapshot rather than reusing the old ref.
+  4. Report what you actually observed on the page, quoting the text you read.
+
+  Stop and ask before anything irreversible or authenticated — purchases, sends,
+  deletes, or submitting credentials. Say what you are about to do and act in
+  the same turn otherwise; don't end a turn having only described a plan.
+
+# No `tools:` block is required for MCP — servers under tools/mcp/*.yaml are
+# auto-discovered and their tools exposed to the agent.
