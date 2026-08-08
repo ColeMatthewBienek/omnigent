@@ -27,6 +27,7 @@ and closed over by route factories — no per-request import cost.
 
 from __future__ import annotations
 
+import ipaddress
 import logging
 import os
 import time
@@ -316,6 +317,57 @@ def decode_scheduled_task_project_owner(
     if stored is None:
         return resolve_project_owner(user_id, local_single_user=local_single_user)
     return stored if stored != _PROJECT_OWNER_ANONYMOUS else None
+
+
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+
+
+def bind_host_is_loopback(host: str) -> bool:
+    """Whether *host* only accepts connections from this machine.
+
+    A wildcard (``0.0.0.0`` / ``::``) is not loopback — it accepts traffic
+    from every reachable interface. Unparseable values (an unresolved
+    hostname) count as non-loopback, so a warning gated on this errs
+    toward "reachable".
+
+    :param host: Bind host, e.g. ``"127.0.0.1"``, ``"0.0.0.0"``.
+    :returns: ``True`` when the bind is loopback-only.
+    """
+    if host in _LOOPBACK_HOSTS:
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def warn_if_single_user_exposed(host: str) -> str | None:
+    """Return a warning when a single-user server is network-reachable.
+
+    Header mode with the single-user marker serves every unauthenticated
+    request as :data:`RESERVED_USER_LOCAL` — the intended posture on
+    loopback, but on a reachable interface it hands that identity to
+    anyone who can connect. Accounts/oidc route identity through the
+    cookie path, so they are not exposed and stay silent.
+
+    Callers own how the text surfaces: Click's stderr for the CLI, a
+    logger for container entrypoints where stderr is buried.
+
+    :param host: The resolved bind host, e.g. ``"0.0.0.0"``.
+    :returns: The multi-line warning, or ``None`` when not exposed.
+    """
+    if bind_host_is_loopback(host):
+        return None
+    if not local_single_user_enabled() or resolve_auth_source() != "header":
+        return None
+    return (
+        f"SECURITY: {_LOCAL_SINGLE_USER_ENV} is set and the server is bound to "
+        f"the non-local interface {host}.\n"
+        f'    This server will serve UNAUTHENTICATED requests as the "'
+        f'{RESERVED_USER_LOCAL}" user to anyone who can reach this address.\n'
+        "    Only do this on a trusted private network.\n"
+        f"    Unset {_LOCAL_SINGLE_USER_ENV} to require login instead."
+    )
 
 
 def resolve_auth_header() -> str:
