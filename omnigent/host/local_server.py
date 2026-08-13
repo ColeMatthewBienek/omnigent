@@ -23,6 +23,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -54,6 +55,18 @@ _LOCAL_SERVER_BOOT_CEILING_SECONDS = 120.0
 _DOOMED_CHILD_EXIT_GRACE_S = _LOCAL_SERVER_READY_TIMEOUT_SECONDS
 
 
+_data_dir_guard: Callable[[Path], None] | None = None
+"""Optional callback invoked with every resolved data dir.
+
+``None`` in production. The test suite installs a callback that raises the
+moment a resolution lands on the developer's real ``~/.omnigent``, so a test
+that repoints ``OMNIGENT_DATA_DIR`` mid-run fails at the offending call
+instead of after the damage (see ``tests/conftest.py``). Read through the
+module global on every call so it covers callers that imported
+:func:`_local_data_dir` by name.
+"""
+
+
 def _local_data_dir() -> Path:
     """Return the local runtime data dir (db, artifacts, logs, pidfile).
 
@@ -74,9 +87,10 @@ def _local_data_dir() -> Path:
     :returns: The data directory path (callers create it lazily).
     """
     value = os.environ.get("OMNIGENT_DATA_DIR")
-    if value:
-        return Path(value).expanduser()
-    return Path.home() / ".omnigent"
+    resolved = Path(value).expanduser() if value else Path.home() / ".omnigent"
+    if _data_dir_guard is not None:
+        _data_dir_guard(resolved)
+    return resolved
 
 
 # Every path below is resolved per call, never at import. Binding them at
@@ -208,6 +222,78 @@ def _read_local_server_pid_file() -> tuple[int, int] | None:
         return None
 
 
+@dataclass(frozen=True)
+class _ProcessIdentity:
+    """A process pinned to its start time, so a recycled pid never matches.
+
+    :param pid: Process id, e.g. ``93359``.
+    :param create_time: The process's start time as reported by psutil.
+    """
+
+    pid: int
+    create_time: float
+
+
+def _process_identity(pid: int) -> _ProcessIdentity | None:
+    """Return *pid*'s identity, or ``None`` when it cannot be established.
+
+    :param pid: Process id to pin, e.g. ``93359``.
+    :returns: The identity, or ``None`` for a vanished / unreadable process.
+    """
+    try:
+        return _ProcessIdentity(pid=pid, create_time=psutil.Process(pid).create_time())
+    except (psutil.Error, OSError):
+        return None
+
+
+@dataclass(frozen=True)
+class _LocalServerRecord:
+    """The pidfile's contents, including the ownership evidence.
+
+    :param pid: Recorded server pid.
+    :param port: Recorded server port.
+    :param create_time: Start time of the process at the moment it was
+        recorded; ``None`` for a legacy record or an unreadable process.
+    :param data_dir: The data dir the recorded server serves; ``None`` for a
+        legacy record written before this field existed.
+    """
+
+    pid: int
+    port: int
+    create_time: float | None
+    data_dir: Path | None
+
+
+def _read_local_server_full_record() -> _LocalServerRecord | None:
+    """Read the pidfile including its ownership evidence.
+
+    Tolerates the two-line legacy layout (``create_time`` / ``data_dir``
+    absent) — such a record simply carries no ownership evidence, and the
+    off-switch then falls back to proving ownership from the target's argv.
+
+    :returns: The parsed record, or ``None`` when absent or malformed.
+    """
+    pid_path = _local_server_pid_path()
+    try:
+        lines = pid_path.read_text().strip().splitlines()
+    except OSError:
+        return None
+    if len(lines) < 2:
+        return None
+    try:
+        pid, port = int(lines[0]), int(lines[1])
+    except ValueError:
+        return None
+    create_time: float | None = None
+    if len(lines) > 2 and lines[2].strip():
+        try:
+            create_time = float(lines[2])
+        except ValueError:
+            create_time = None
+    data_dir = Path(lines[3]) if len(lines) > 3 and lines[3].strip() else None
+    return _LocalServerRecord(pid=pid, port=port, create_time=create_time, data_dir=data_dir)
+
+
 def local_server_url_if_healthy() -> str | None:
     """Return the URL of a live, reused local server, else ``None``.
 
@@ -272,7 +358,17 @@ def _write_local_server_record(
     else:
         with contextlib.suppress(OSError):
             _local_server_log_ref_path().unlink()
-    _atomic_write(_local_server_pid_path(), f"{pid}\n{port}\n")
+    # Lines 3 and 4 are the ownership evidence the off-switch verifies before
+    # signalling: the process start time (so a recycled pid can never be
+    # mistaken for this server) and the data dir this server serves. A
+    # foreground `omnigent server` carries neither in its argv, so without
+    # them it would be unverifiable — and therefore unstoppable.
+    identity = _process_identity(pid)
+    create_time = "" if identity is None else repr(identity.create_time)
+    _atomic_write(
+        _local_server_pid_path(),
+        f"{pid}\n{port}\n{create_time}\n{_local_data_dir()}\n",
+    )
 
 
 def _read_local_server_log_path() -> Path | None:
@@ -341,7 +437,33 @@ _STOP_POLL_INTERVAL_S = 0.1
 """Polling interval while waiting for the server process to exit."""
 
 
-def _terminate_pid(pid: int) -> None:
+def _still_the_verified_process(identity: _ProcessIdentity | None) -> bool:
+    """Return whether *identity* still describes the live process at its pid.
+
+    Closes the window between verifying ownership and signalling: a
+    verified server can exit in that gap and the OS can hand its pid to
+    something else, so the identity is rechecked immediately before every
+    signal rather than once up front.
+
+    :param identity: The identity captured at verification, or ``None`` when
+        the caller opted out of identity pinning (it owns the process
+        handle directly).
+    :returns: ``True`` when it is safe to signal.
+    """
+    if identity is None:
+        return True
+    current = _process_identity(identity.pid)
+    if current == identity:
+        return True
+    _logger.warning(
+        "Not signalling pid %d: it is no longer the process that was verified "
+        "(it exited or the pid was recycled)",
+        identity.pid,
+    )
+    return False
+
+
+def _terminate_pid(pid: int, identity: _ProcessIdentity | None = None) -> None:
     """SIGTERM a pid, wait up to the grace period, then SIGKILL if needed.
 
     Shared by :func:`stop_local_omnigent_server` (the pidfile-tracked server) and
@@ -350,11 +472,18 @@ def _terminate_pid(pid: int) -> None:
     port becomes immediately re-bindable. Best-effort: a dead pid is a no-op.
 
     :param pid: Process id to terminate, e.g. ``93359``.
+    :param identity: Identity captured when ownership was verified. Rechecked
+        immediately before each signal so neither the SIGTERM nor the later
+        SIGKILL can land on a process that took over the pid in between.
+        ``None`` for callers holding the process handle themselves (a spawn
+        that is reaping its own child), which have no such race.
     :returns: None.
     """
     import signal
 
     if not _pid_alive(pid):
+        return
+    if not _still_the_verified_process(identity):
         return
     with contextlib.suppress(ProcessLookupError, OSError):
         os.kill(pid, signal.SIGTERM)
@@ -365,6 +494,10 @@ def _terminate_pid(pid: int) -> None:
         time.sleep(_STOP_POLL_INTERVAL_S)
     # Grace period expired — force-kill so the port is freed. Windows has no
     # SIGKILL; os.kill with SIGTERM there maps to TerminateProcess (forceful).
+    # Recheck first: the grace period is the widest window for the verified
+    # process to exit and its pid to be reused.
+    if not _still_the_verified_process(identity):
+        return
     with contextlib.suppress(ProcessLookupError, OSError):
         os.kill(pid, getattr(signal, "SIGKILL", signal.SIGTERM))
     # Brief wait for the kernel to reap after SIGKILL.
@@ -408,73 +541,146 @@ def _is_omnigent_server_cmdline(cmdline: list[str]) -> bool:
     """Return whether *cmdline* is an ``omnigent server`` invocation.
 
     Only two spawns ever claim the local-server record: the daemon's
-    ``python -m omnigent.cli server`` and a foreground ``omnigent server``
-    registering itself. Matching on the entrypoint AND the subcommand keeps
-    an interpreter that merely lives inside a path containing "omnigent"
-    (any checkout of this repo) from passing.
+    ``python -m omnigent.cli server`` and a foreground ``omnigent server``.
+    Both are matched on the entrypoint *position* — argv[0]'s basename, or
+    ``-m`` immediately followed by the module — rather than on "omnigent
+    appears somewhere in argv", which any interpreter living under a path
+    containing the word would satisfy.
 
     :param cmdline: A process argv.
     :returns: ``True`` when the argv names an Omnigent server.
     """
-    if "server" not in cmdline:
+    if not cmdline or "server" not in cmdline:
         return False
-    if any(arg in {"omnigent.cli", "omnigent", "omni"} for arg in cmdline):
+    if Path(cmdline[0]).name in {"omnigent", "omni"}:
         return True
-    return Path(cmdline[0]).name in {"omnigent", "omni"}
+    return any(
+        arg == "-m" and index + 1 < len(cmdline) and cmdline[index + 1] == "omnigent.cli"
+        for index, arg in enumerate(cmdline)
+    )
 
 
-def _recorded_server_is_ours(pid: int) -> bool:
-    """Return ``False`` when *pid* is provably NOT this data dir's server.
+def _serves_this_data_dir(candidate: str | Path | None, *, source: str, pid: int) -> bool:
+    """Return whether *candidate* is proof the pid serves THIS data dir.
 
-    Defence in depth for the one place that signals a pid read off disk.
-    A record naming a server that belongs to a *different* data dir — the
-    developer's real ``~/.omnigent`` daemon while this process runs against
-    an isolated one — or a pid the OS recycled onto an unrelated program
-    must never be SIGTERMed.
-
-    Ownership is proven from the target's own argv, which the spawn path
-    stamps with this data dir (``--artifact-location <data_dir>/artifacts``).
-    The config signature cannot serve as the gate: the drift heal in
-    :func:`ensure_local_omnigent_server` stops a server precisely *because*
-    its signature no longer matches this invocation's.
-
-    Fails open on an argv we cannot read (another user's process, a
-    platform that hides argv): that proves nothing either way, and refusing
-    there would break the off-switch.
-
-    :param pid: The pid recorded in the local-server pidfile, e.g. ``93359``.
-    :returns: ``True`` when the pid may be signalled.
+    :param candidate: A data dir claimed by the process (from its recorded
+        evidence or its argv), or ``None`` when there is no claim.
+    :param source: Where the claim came from, for the refusal log.
+    :param pid: The pid being checked, for the refusal log.
+    :returns: ``True`` only when *candidate* is absolute and canonically
+        equal to this process's data dir.
     """
-    cmdline = _process_cmdline(pid)
-    if not cmdline:
-        return True
-    if not _is_omnigent_server_cmdline(cmdline):
+    if candidate is None:
+        return False
+    claimed = Path(candidate).expanduser()
+    if not claimed.is_absolute():
+        # A relative path resolves against whatever cwd the spawn ran in,
+        # which this process need not share — it proves nothing.
         _logger.warning(
-            "Refusing to stop pid %d recorded as the local server: it is not an "
-            "Omnigent server (%s)",
+            "Refusing to stop pid %d: its %s data dir %r is relative, so ownership "
+            "cannot be established",
             pid,
-            " ".join(cmdline[:3]),
+            source,
+            str(candidate),
         )
         return False
-    artifacts = _cmdline_option(cmdline, "--artifact-location")
-    if artifacts is None:
-        # A foreground `omnigent server` carries no data-dir marker in its
-        # argv — nothing to disprove, so it stays stoppable.
-        return True
-    recorded = Path(artifacts).expanduser()
-    if not recorded.is_absolute():
-        # A relative marker resolves against whatever cwd the spawn ran in,
-        # which this process need not share — it proves nothing.
-        return True
-    if recorded.resolve() == (_local_data_dir() / "artifacts").expanduser().resolve():
+    if claimed.resolve() == _local_data_dir().expanduser().resolve():
         return True
     _logger.warning(
-        "Refusing to stop pid %d recorded as the local server: it serves data dir %s, not %s",
+        "Refusing to stop pid %d: its %s data dir %s is not this process's %s",
         pid,
-        recorded.parent,
+        source,
+        claimed,
         _local_data_dir(),
     )
     return False
+
+
+def _verify_server_ownership(
+    pid: int, *, recorded: _LocalServerRecord | None
+) -> _ProcessIdentity | None:
+    """Return *pid*'s identity only if it is PROVABLY this data dir's server.
+
+    Fails closed. Every path that cannot positively establish ownership —
+    an unreadable argv, an argv that is not an Omnigent server, a missing or
+    corrupt record, a missing or relative ``--artifact-location``, a start
+    time that disagrees with the record — refuses and says why. Killing the
+    wrong process (a developer's live daemon, an unrelated program that
+    inherited a recycled pid) is far worse than leaving a stale server up,
+    which the user can always stop by hand.
+
+    Ownership is proven by either source, both of which name an absolute
+    data dir:
+
+    * the record's own evidence, written by whichever process claimed the
+      pidfile — the only proof a foreground ``omnigent server`` has, since
+      its argv carries no ``--artifact-location``; or
+    * the target's argv, for a daemon-spawned server, whose
+      ``--artifact-location`` the spawn stamps with this data dir.
+
+    The config signature is deliberately NOT part of this: the drift heal in
+    :func:`ensure_local_omnigent_server` stops a server precisely *because*
+    its signature no longer matches this invocation's.
+
+    :param pid: The pid under consideration, e.g. ``93359``.
+    :param recorded: The pidfile record naming it, or ``None`` when the pid
+        came from a source that has no record (the untracked-port sweep).
+    :returns: The verified :class:`_ProcessIdentity` to signal, or ``None``
+        to refuse.
+    """
+    identity = _process_identity(pid)
+    if identity is None:
+        _logger.warning(
+            "Refusing to stop pid %d: its identity could not be read, so ownership "
+            "cannot be established",
+            pid,
+        )
+        return None
+
+    if recorded is not None and recorded.create_time is not None:
+        # The pid was recycled since the record was written: whatever holds
+        # it now is a different process than the one we recorded.
+        if recorded.create_time != identity.create_time:
+            _logger.warning(
+                "Refusing to stop pid %d: it started at %r but the record names a "
+                "process started at %r — the pid was recycled",
+                pid,
+                identity.create_time,
+                recorded.create_time,
+            )
+            return None
+
+    if recorded is not None and _serves_this_data_dir(
+        recorded.data_dir, source="recorded", pid=pid
+    ):
+        return identity
+
+    cmdline = _process_cmdline(pid)
+    if cmdline is None:
+        _logger.warning(
+            "Refusing to stop pid %d: its command line could not be read, so "
+            "ownership cannot be established",
+            pid,
+        )
+        return None
+    if not _is_omnigent_server_cmdline(cmdline):
+        _logger.warning(
+            "Refusing to stop pid %d: it is not an Omnigent server (%s)",
+            pid,
+            " ".join(cmdline[:3]),
+        )
+        return None
+    artifacts = _cmdline_option(cmdline, "--artifact-location")
+    if artifacts is None:
+        _logger.warning(
+            "Refusing to stop pid %d: neither its record nor its command line names "
+            "the data dir it serves, so ownership cannot be established",
+            pid,
+        )
+        return None
+    if _serves_this_data_dir(Path(artifacts).parent, source="command-line", pid=pid):
+        return identity
+    return None
 
 
 def stop_local_omnigent_server() -> None:
@@ -493,21 +699,21 @@ def stop_local_omnigent_server() -> None:
     NOT visible here — :func:`stop_untracked_local_server` covers that, and
     the off-switch (``omnigent stop`` / ``server stop``) calls both.
 
-    Refuses to signal a pid the record does not prove is this data dir's
-    server (:func:`_recorded_server_is_ours`) — a foreign daemon or a
-    recycled pid is left alone, record and all.
+    Refuses, and leaves the record intact, unless ownership is positively
+    proven (:func:`_verify_server_ownership`) — a foreign daemon, a recycled
+    pid, or simply a pid whose ownership cannot be established is left alone.
 
     :returns: None.
     """
-    existing = _read_local_server_pid_file()
-    if existing is not None:
-        pid, _port = existing
-        if not _recorded_server_is_ours(pid):
+    recorded = _read_local_server_full_record()
+    if recorded is not None:
+        identity = _verify_server_ownership(recorded.pid, recorded=recorded)
+        if identity is None:
             # Not ours to stop, and not ours to forget either: clearing the
             # record would hand the next invocation a blank slate for a
             # server that is still running.
             return
-        _terminate_pid(pid)
+        _terminate_pid(recorded.pid, identity)
     with contextlib.suppress(OSError):
         _local_server_pid_path().unlink()
     with contextlib.suppress(OSError):
@@ -936,8 +1142,9 @@ def stop_untracked_local_server(port: int = _DEFAULT_LOCAL_PORT) -> int | None:
     it. Call it AFTER :func:`stop_local_omnigent_server` so a normally-tracked
     server is already gone and ``/health`` no longer answers (this is a
     no-op). Best-effort: returns ``None`` when nothing untracked is found,
-    ``lsof`` is unavailable, or the listener is provably another data dir's
-    server (:func:`_recorded_server_is_ours`).
+    ``lsof`` is unavailable, or the listener is not provably a server for
+    THIS data dir (:func:`_verify_server_ownership`). An orphan carrying no
+    ownership evidence is left running rather than risked.
 
     :param port: Canonical loopback port to sweep, e.g. ``6767``.
     :returns: The PID stopped, or ``None`` if there was nothing to stop.
@@ -950,10 +1157,13 @@ def stop_untracked_local_server(port: int = _DEFAULT_LOCAL_PORT) -> int | None:
         return None
     # Answering /health on the canonical port is not ownership: the server
     # there may belong to another data dir (a second checkout, the
-    # developer's real ~/.omnigent). Same gate as the pidfile path.
-    if not _recorded_server_is_ours(pid):
+    # developer's real ~/.omnigent). There is no record to appeal to here —
+    # that is what "untracked" means — so ownership must be proven by the
+    # target's own argv, and the sweep refuses whenever it cannot be.
+    identity = _verify_server_ownership(pid, recorded=None)
+    if identity is None:
         return None
-    _terminate_pid(pid)
+    _terminate_pid(pid, identity)
     return pid
 
 

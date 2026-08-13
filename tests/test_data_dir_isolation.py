@@ -73,17 +73,57 @@ def test_daemon_record_paths_are_never_import_time_constants() -> None:
     assert frozen == [], f"data-dir paths frozen at import: {frozen}"
 
 
-def test_guard_fails_when_the_data_dir_is_the_real_user_data_dir(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_guard_rejects_the_real_data_dir(monkeypatch: pytest.MonkeyPatch) -> None:
     """The guard trips when resolution lands on the developer's own dir.
 
     Only the path is resolved here — nothing reads or writes it — so the
     check itself is safe to exercise against the real location.
     """
+    monkeypatch.setattr(local_server, "_data_dir_guard", None)
     monkeypatch.setenv("OMNIGENT_DATA_DIR", str(_REAL_USER_DATA_DIR))
 
-    with pytest.raises(AssertionError, match="resolved the runtime data dir to the real"):
+    with pytest.raises(AssertionError, match="developer's real"):
+        assert_isolated_data_dir("tests/test_x.py::test_y", "before")
+
+
+def test_guard_rejects_a_noncanonical_path_to_the_real_data_dir(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``~/.omnigent/../.omnigent`` is the real dir wearing a disguise.
+
+    A string comparison passes it straight through, which is why both sides
+    are canonicalized before they are compared.
+    """
+    monkeypatch.setattr(local_server, "_data_dir_guard", None)
+    disguised = _REAL_USER_DATA_DIR / ".." / ".omnigent"
+    monkeypatch.setenv("OMNIGENT_DATA_DIR", str(disguised))
+
+    with pytest.raises(AssertionError, match="developer's real"):
+        assert_isolated_data_dir("tests/test_x.py::test_y", "before")
+
+
+def test_guard_rejects_a_path_inside_the_real_data_dir(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Writing under ``~/.omnigent`` is the same hazard as writing to it."""
+    monkeypatch.setattr(local_server, "_data_dir_guard", None)
+    monkeypatch.setenv("OMNIGENT_DATA_DIR", str(_REAL_USER_DATA_DIR / "scratch"))
+
+    with pytest.raises(AssertionError, match="developer's real"):
+        assert_isolated_data_dir("tests/test_x.py::test_y", "before")
+
+
+def test_guard_rejects_a_symlink_to_the_real_data_dir(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A symlink is a second name for the same directory, and is caught."""
+    monkeypatch.setattr(local_server, "_data_dir_guard", None)
+    link = tmp_path / "sneaky"
+    link.symlink_to(_REAL_USER_DATA_DIR, target_is_directory=True)
+    monkeypatch.setenv("OMNIGENT_DATA_DIR", str(link))
+
+    with pytest.raises(AssertionError, match="developer's real"):
         assert_isolated_data_dir("tests/test_x.py::test_y", "before")
 
 
@@ -96,10 +136,33 @@ def test_guard_fails_when_the_data_dir_override_is_dropped(
     a fixture that deletes ``OMNIGENT_DATA_DIR`` and lets ``Path.home()``
     take over.
     """
+    monkeypatch.setattr(local_server, "_data_dir_guard", None)
     monkeypatch.delenv("OMNIGENT_DATA_DIR", raising=False)
 
-    with pytest.raises(AssertionError, match="resolved the runtime data dir to the real"):
+    with pytest.raises(AssertionError, match="developer's real"):
         assert_isolated_data_dir("tests/test_x.py::test_y", "after")
+
+
+def test_guard_fires_mid_test_at_the_moment_of_resolution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Isolation is enforced during the test, not only at its boundaries.
+
+    A test that repoints ``OMNIGENT_DATA_DIR`` at the real dir inside its
+    own body and restores it before teardown would slip past a check that
+    only runs before and after. The session installs a hook inside
+    :func:`_local_data_dir`, so the very call that would hand out the real
+    path raises instead.
+    """
+    monkeypatch.setenv("OMNIGENT_DATA_DIR", str(_REAL_USER_DATA_DIR))
+
+    with pytest.raises(AssertionError, match="developer's real"):
+        local_server._local_data_dir()
+
+
+def test_guard_hook_is_installed_for_every_test() -> None:
+    """The hook must be live, or the mid-test window silently reopens."""
+    assert local_server._data_dir_guard is not None
 
 
 def test_guard_passes_for_an_isolated_data_dir(
@@ -109,3 +172,4 @@ def test_guard_passes_for_an_isolated_data_dir(
     """A tmp data dir passes — the guard flags only the real one."""
     monkeypatch.setenv("OMNIGENT_DATA_DIR", str(tmp_path))
     assert_isolated_data_dir("tests/test_x.py::test_y", "before")
+    assert local_server._local_data_dir() == tmp_path

@@ -65,7 +65,7 @@ pytest_plugins = ["tests._token_usage"]
 # daemon records its pids here; a test that resolves to this directory can
 # read those pids and SIGTERM the user's own server, so
 # :func:`_guard_real_omnigent_data_dir` fails any test that does.
-_REAL_USER_DATA_DIR = Path(os.path.expanduser("~")) / ".omnigent"
+_REAL_USER_DATA_DIR = (Path(os.path.expanduser("~")) / ".omnigent").resolve()
 
 
 def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
@@ -303,10 +303,48 @@ def _isolate_omnigent_data_dir(
     :param tmp_path_factory: Pytest's session-scoped temp factory.
     :returns: None.
     """
+    from omnigent.host import local_server
+
     monkeypatch = pytest.MonkeyPatch()
     monkeypatch.setenv("OMNIGENT_DATA_DIR", str(tmp_path_factory.mktemp("omnigent-data")))
+    # Check every resolution, not just the ones at test boundaries: a test
+    # that repoints OMNIGENT_DATA_DIR at the real dir mid-body and restores it
+    # before teardown would otherwise do its damage unseen. The hook fires
+    # inside _local_data_dir itself, so it covers callers that imported the
+    # function by name too.
+    monkeypatch.setattr(
+        local_server,
+        "_data_dir_guard",
+        lambda resolved: _reject_real_data_dir(resolved, "a test"),
+    )
     yield
     monkeypatch.undo()
+
+
+def _reject_real_data_dir(candidate: Path, context: str) -> None:
+    """Raise if *candidate* is (or sits inside) the developer's real data dir.
+
+    Compares canonical forms — ``Path.resolve()`` on both sides — so
+    ``~/.omnigent/../.omnigent``, a trailing ``.``, or a symlink pointing at
+    the real directory cannot slip past a string comparison. Containment is
+    rejected too: writing to ``~/.omnigent/anything`` is the same hazard as
+    writing to the directory itself.
+
+    :param candidate: The resolved runtime data dir to check.
+    :param context: What produced it, for the failure message.
+    :returns: None.
+    :raises AssertionError: If *candidate* is the real data dir or is under it.
+    """
+    resolved = candidate.expanduser().resolve()
+    if resolved != _REAL_USER_DATA_DIR and not resolved.is_relative_to(_REAL_USER_DATA_DIR):
+        return
+    raise AssertionError(
+        f"{context} resolved the runtime data dir to {resolved}, which is the "
+        f"developer's real {_REAL_USER_DATA_DIR}. Tests must never read or write "
+        f"it: it holds a live daemon's pid records, and any helper that reaches "
+        f"ensure_local_omnigent_server() can stop the server they name. Set "
+        f"OMNIGENT_DATA_DIR to a tmp dir instead."
+    )
 
 
 def assert_isolated_data_dir(nodeid: str, when: str) -> None:
@@ -321,14 +359,7 @@ def assert_isolated_data_dir(nodeid: str, when: str) -> None:
     """
     from omnigent.host.local_server import _local_data_dir
 
-    resolved = _local_data_dir().expanduser()
-    assert resolved != _REAL_USER_DATA_DIR, (
-        f"{nodeid} resolved the runtime data dir to the real "
-        f"{_REAL_USER_DATA_DIR} {when} the test. Tests must never read or "
-        f"write it: it holds a live daemon's pid records, and any helper that "
-        f"reaches ensure_local_omnigent_server() will stop the server they "
-        f"name. Set OMNIGENT_DATA_DIR to a tmp dir instead."
-    )
+    _reject_real_data_dir(_local_data_dir(), f"{nodeid} ({when} the test)")
 
 
 @pytest.fixture(autouse=True)
@@ -336,10 +367,11 @@ def _guard_real_omnigent_data_dir(request: pytest.FixtureRequest) -> Generator[N
     """
     Fail any test whose resolved data dir is the developer's real one.
 
-    :func:`_isolate_omnigent_data_dir` sets the redirect; this asserts it
-    actually took, on both sides of every test — a fixture that clears
-    ``OMNIGENT_DATA_DIR``, or a code path that stops honoring it, surfaces
-    as a failing test instead of a dead daemon.
+    :func:`_isolate_omnigent_data_dir` sets the redirect and installs the
+    in-resolution hook that catches mid-test drift; this is the boundary
+    check on top of it, so a fixture that clears ``OMNIGENT_DATA_DIR``
+    without ever resolving it still surfaces as a failing test rather than
+    leaking into the next one.
 
     Autouse fixtures run before explicitly-requested ones, so this checks
     *outside* any ``monkeypatch`` a test applies: a test that inspects
