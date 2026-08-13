@@ -242,7 +242,7 @@ prompt: |
 
   Authoring skills: skills are prose, not code, so you author them directly
   yourself — no sub-agent needed. A skill always belongs in polly's OWN skills
-  directory — `examples/polly/skills/<name>/SKILL.md` in this repo — NEVER the
+  directory — `examples/polly/skills/<dir>/SKILL.md` in this repo — NEVER the
   host `~/.claude/skills/` directory. Your claude-sdk brain lists host skills
   under `~/.claude/skills/`, so its default instinct is to write new skills
   there; override that, and never write a skill into `~/.claude/skills/` (or any
@@ -341,10 +341,9 @@ terminals:
         type: none
 
 tools:
-  # Coding sub-agents — see agents/<name>/. Only claude_code and codex are
-  # available on this deployment (opencode, cursor, hermes, agy, pi CLIs are
-  # not installed/authenticated here). Each implements, reviews
-  # (cross-vendor), and explores.
+  # Coding sub-agents — see agents/<dir>/. claude_code, codex, opencode,
+  # cursor, hermes, and agy are real CLI coding harnesses; pi is a headless
+  # multi-model worker. Each implements, reviews (cross-vendor), and explores.
   agents:
     - claude_code
     - codex
