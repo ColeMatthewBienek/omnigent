@@ -134,6 +134,18 @@ def _create_upload_file(config: dict[str, str]) -> Tool:
     return UploadFileTool()
 
 
+def _create_publish_artifact(config: dict[str, str]) -> Tool:
+    """
+    Lazy factory for PublishArtifactTool.
+
+    :param config: Tool config (unused).
+    :returns: A PublishArtifactTool instance.
+    """
+    from omnigent.tools.builtins.publish_artifact import PublishArtifactTool
+
+    return PublishArtifactTool()
+
+
 def _create_search_conversations(config: dict[str, str]) -> Tool:
     """
     Lazy factory for SearchConversationsTool.
@@ -253,6 +265,7 @@ _BUILTIN_REGISTRY: dict[str, _BuiltinFactory | None] = {
     "nimble_research": lambda config: NimbleResearchTool(config=config),
     "nimble_extract": lambda config: NimbleExtractTool(config=config),
     "upload_file": _create_upload_file,
+    "publish_artifact": _create_publish_artifact,
     "list_files": _create_list_files,
     "download_file": _create_download_file,
     "search_conversations": _create_search_conversations,

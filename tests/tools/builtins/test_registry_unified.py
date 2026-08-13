@@ -118,6 +118,7 @@ def test_builtin_names_size_matches_registry() -> None:
                 "nimble_research",
                 "nimble_extract",
                 "upload_file",
+                    "publish_artifact",
                 "list_files",
                 "download_file",
                 "search_conversations",

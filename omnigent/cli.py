@@ -3923,6 +3923,7 @@ def server(
         agent_cache=agent_cache,
         file_store=file_store,
         artifact_store=artifact_store,
+        session_artifact_store=session_artifact_store,
         comment_store=comment_store,
         policy_store=policy_store,
         caps=caps,
