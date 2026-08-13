@@ -634,7 +634,12 @@ def _record(tmp_path: Path, pid: int, *, create_time: str = "1.0", data_dir: str
     :returns: The pidfile path.
     """
     pid_file = tmp_path / "local_server.pid"
-    pid_file.write_text(f"{pid}\n8000\n{create_time}\n{data_dir}\n")
+    if not create_time and not data_dir:
+        # A genuine two-line legacy record, not an extended one with its
+        # evidence fields blanked out — that shape is corrupt.
+        pid_file.write_text(f"{pid}\n8000\n")
+    else:
+        pid_file.write_text(f"{pid}\n8000\n{create_time}\n{data_dir}\n")
     return pid_file
 
 
@@ -903,7 +908,13 @@ def test_omnigent_server_cmdline_match_is_anchored_to_the_entrypoint(
         ("4242\n8000\nnot-a-time\n/tmp/data\n", "unparseable start time"),
         ("4242\n8000\n1.0\n\n", "empty data dir"),
         ("4242\n8000\n1.0\nrelative/dir\n", "relative data dir"),
+        ("4242\n8000\n/tmp/data\n1.0\n", "evidence fields transposed"),
         ("4242\n8000\n1.0\n/tmp/data\nextra\n", "trailing junk"),
+        # The shape that used to collapse into a "legacy" record once the
+        # text was stripped, taking the weakest proof route with it.
+        ("4242\n8000\n\n", "extended record with blank evidence fields"),
+        ("4242\n8000\n\n\n", "extended record with two blank evidence fields"),
+        ("4242\n8000\n \n", "whitespace-only third line"),
     ],
 )
 def test_stop_refuses_a_corrupt_extended_record(
@@ -950,6 +961,104 @@ def pid_file_body(body: str, tmp_path: Path) -> str:
     return body.replace("/tmp/data", str(tmp_path))
 
 
+def test_a_blank_field_record_is_never_read_as_legacy(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Trailing blank lines must not demote a record to the legacy shape.
+
+    ``"<pid>\\n<port>\\n\\n"`` is an extended record whose evidence fields
+    are empty. Classifying on stripped text made it indistinguishable from a
+    genuine two-line record — i.e. it would have reached the legacy kill
+    route, the one with the weakest proof requirement.
+    """
+    monkeypatch.setenv("OMNIGENT_DATA_DIR", str(tmp_path))
+    (tmp_path / "local_server.pid").write_text("4242\n8000\n\n")
+
+    record = local_server._read_local_server_full_record()
+
+    assert record is not None
+    assert record.kind == "corrupt"
+
+
+def test_a_genuine_two_line_record_is_still_legacy(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The strict parser must not sweep up real pre-upgrade records.
+
+    With or without the conventional trailing newline.
+    """
+    monkeypatch.setenv("OMNIGENT_DATA_DIR", str(tmp_path))
+    for body in ("4242\n8000\n", "4242\n8000"):
+        (tmp_path / "local_server.pid").write_text(body)
+        record = local_server._read_local_server_full_record()
+        assert record is not None
+        assert record.kind == "legacy", f"{body!r} should still parse as legacy"
+        assert (record.pid, record.port) == (4242, 8000)
+
+
+def test_legacy_route_refuses_a_process_that_postdates_its_record(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A pid recycled after the record was written fails the legacy route.
+
+    The legacy record carries no start time, so ordering against the file's
+    mtime is the only lineage evidence available: a server writes its
+    record after it starts, so a process that started *later* than the
+    record cannot be the one that wrote it.
+    """
+    pid_file = tmp_path / "local_server.pid"
+    pid_file.write_text("4242\n8000\n")
+    record_mtime = pid_file.stat().st_mtime
+    signalled = _refuse_fixture(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        local_server,
+        "_process_identity",
+        lambda pid: local_server._ProcessIdentity(pid=pid, create_time=record_mtime + 60.0),
+    )
+    monkeypatch.setattr(
+        local_server,
+        "_process_cmdline",
+        lambda pid: ["/opt/bin/omnigent", "server", "--port", "6767"],
+    )
+
+    local_server.stop_local_omnigent_server()
+
+    assert signalled == [], "signalled a process that started after its own record"
+    assert pid_file.exists()
+
+
+def test_legacy_route_refuses_when_the_record_timestamp_is_unreadable(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """No timestamp, no lineage, no signal."""
+    pid_file = tmp_path / "local_server.pid"
+    pid_file.write_text("4242\n8000\n")
+    signalled = _refuse_fixture(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        local_server,
+        "_process_identity",
+        lambda pid: local_server._ProcessIdentity(pid=pid, create_time=1.0),
+    )
+    monkeypatch.setattr(
+        local_server,
+        "_process_cmdline",
+        lambda pid: ["/opt/bin/omnigent", "server", "--port", "6767"],
+    )
+
+    def _no_stat(self: Path) -> object:
+        raise OSError("stat unavailable")
+
+    monkeypatch.setattr(Path, "stat", _no_stat)
+
+    local_server.stop_local_omnigent_server()
+
+    assert signalled == []
+
+
 def test_stop_still_works_for_a_legacy_foreground_record(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -966,10 +1075,13 @@ def test_stop_still_works_for_a_legacy_foreground_record(
     pid_file.write_text("4242\n8000\n")
     monkeypatch.setenv("OMNIGENT_DATA_DIR", str(tmp_path))
     monkeypatch.setattr(local_server, "_PIDFD_AVAILABLE", False)
+    # A genuine foreground server was already running when it wrote its
+    # record, so its start time precedes the file's mtime.
+    started_before = pid_file.stat().st_mtime - 60.0
     monkeypatch.setattr(
         local_server,
         "_process_identity",
-        lambda pid: local_server._ProcessIdentity(pid=pid, create_time=1.0),
+        lambda pid: local_server._ProcessIdentity(pid=pid, create_time=started_before),
     )
     monkeypatch.setattr(
         local_server,
@@ -1008,7 +1120,9 @@ def test_legacy_record_does_not_authorize_another_data_dirs_server(
     monkeypatch.setattr(
         local_server,
         "_process_identity",
-        lambda pid: local_server._ProcessIdentity(pid=pid, create_time=1.0),
+        lambda pid: local_server._ProcessIdentity(
+            pid=pid, create_time=pid_file.stat().st_mtime - 60.0
+        ),
     )
     monkeypatch.setattr(
         local_server,

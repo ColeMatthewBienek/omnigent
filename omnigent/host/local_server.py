@@ -281,8 +281,8 @@ def _read_local_server_full_record() -> _LocalServerRecord | None:
 
     * **extended** — four lines, all valid: pid, port, a parseable start
       time, and an absolute data dir. Carries pinned ownership evidence.
-    * **legacy** — exactly two valid lines, written before this file grew
-      its evidence fields. Carries no evidence (see
+    * **legacy** — a file whose entire content is two valid lines, written
+      before this file grew its evidence fields. Carries no evidence (see
       :func:`_verify_server_ownership` for the narrow proof it still allows).
     * **corrupt** — anything else, including a half-written extended record
       or an unparseable start time.
@@ -290,6 +290,13 @@ def _read_local_server_full_record() -> _LocalServerRecord | None:
     Partial evidence must never be treated as *no* evidence: silently
     dropping an invalid start time would leave a data dir line that matches
     ours, and that alone would authorize a kill against an unpinned pid.
+
+    The line structure is read RAW, never stripped. Stripping first lets an
+    extended record whose evidence fields are empty — ``"<pid>\n<port>\n\n"``
+    — collapse into a two-line shape and pass as *legacy*, which is exactly
+    the classification with the weakest proof requirement. Only the single
+    conventional trailing newline is forgiven; any further blank line or
+    trailing junk is corruption.
 
     :returns: The classified record, ``_CORRUPT_RECORD`` when the file
         exists but does not parse, or ``None`` when there is no file.
@@ -299,8 +306,11 @@ def _read_local_server_full_record() -> _LocalServerRecord | None:
         text = pid_path.read_text()
     except OSError:
         return None
-    lines = text.strip().splitlines()
-    if len(lines) < 2:
+    lines = text.split("\n")
+    if lines and lines[-1] == "":
+        # The one trailing newline this module's writer emits.
+        lines.pop()
+    if len(lines) not in {2, 4}:
         return _CORRUPT_RECORD
     try:
         pid, port = int(lines[0]), int(lines[1])
@@ -311,15 +321,11 @@ def _read_local_server_full_record() -> _LocalServerRecord | None:
         return _LocalServerRecord(
             pid=pid, port=port, create_time=None, data_dir=None, kind="legacy"
         )
-    if len(lines) != 4:
-        # Three lines, or trailing junk: a half-written or hand-edited
-        # record. Neither shape is one this code ever writes.
-        return _CORRUPT_RECORD
     try:
         create_time = float(lines[2])
     except ValueError:
         return _CORRUPT_RECORD
-    data_dir = Path(lines[3].strip()) if lines[3].strip() else None
+    data_dir = Path(lines[3]) if lines[3] else None
     if data_dir is None or not data_dir.is_absolute():
         return _CORRUPT_RECORD
     return _LocalServerRecord(
@@ -746,6 +752,42 @@ def _serves_this_data_dir(candidate: str | Path | None, *, source: str, pid: int
     return False
 
 
+def _started_before_the_record(identity: _ProcessIdentity, *, pid: int) -> bool:
+    """Return whether *identity* started before the pidfile was written.
+
+    The lineage check for the legacy route, which has no recorded start
+    time to compare against. A genuine server was already running when it
+    claimed the record, so its start time precedes the file's mtime; a pid
+    the OS recycled *after* the record was written cannot, however
+    convincing its argv looks.
+
+    Deliberately strict about the unknown: an unreadable mtime refuses.
+
+    :param identity: The candidate process's pinned identity.
+    :param pid: The pid, for the refusal log.
+    :returns: ``True`` when the process predates the record.
+    """
+    try:
+        record_mtime = _local_server_pid_path().stat().st_mtime
+    except OSError as exc:
+        _logger.warning(
+            "Refusing to stop pid %d: its legacy record's timestamp could not be read (%s)",
+            pid,
+            exc,
+        )
+        return False
+    if identity.create_time < record_mtime:
+        return True
+    _logger.warning(
+        "Refusing to stop pid %d: it started at %r, after its legacy record was written "
+        "at %r — the pid was recycled since",
+        pid,
+        identity.create_time,
+        record_mtime,
+    )
+    return False
+
+
 def _verify_server_ownership(
     pid: int, *, recorded: _LocalServerRecord | None
 ) -> _ProcessIdentity | None:
@@ -770,10 +812,11 @@ def _verify_server_ownership(
     * **legacy record** — a pre-upgrade two-line record, for which the
       pidfile's own location in *this* data dir is the only available
       evidence. Accepted only when the argv is a positionally-recognized
-      ``omnigent server`` that names no data dir of its own — i.e. exactly
-      the foreground server that would otherwise have become unstoppable by
-      this change. Deprecated: remove this route in 0.11.0, by which point
-      every live record has been rewritten with full evidence.
+      ``omnigent server`` that names no data dir of its own AND started
+      before its record was written — i.e. exactly the foreground server
+      that would otherwise have become unstoppable by this change.
+      Deprecated: remove this route in 0.11.0, by which point every live
+      record has been rewritten with full evidence.
 
     The config signature is deliberately NOT part of this: the drift heal in
     :func:`ensure_local_omnigent_server` stops a server precisely *because*
@@ -840,13 +883,19 @@ def _verify_server_ownership(
         return None
 
     if recorded is not None and recorded.kind == "legacy":
-        # Legacy migration route (remove in 0.11.0): the argv names no data
-        # dir, so the pidfile's location is the evidence — this record lives
-        # in the data dir this process is operating on, and only a server
-        # that claimed it could be named there.
+        # Legacy migration route (remove in 0.11.0). The argv names no data
+        # dir, so the evidence is the pidfile itself: it lives in the data
+        # dir this process operates on, and only a server that claimed it
+        # could be named there. That alone says nothing about *when*, so
+        # the record's mtime supplies the missing lineage — a server writes
+        # its record after it starts, and a pid recycled after the record
+        # was written cannot satisfy that ordering.
+        if not _started_before_the_record(identity, pid=pid):
+            return None
         _logger.info(
             "Stopping pid %d on legacy-record evidence: its pre-upgrade record in %s "
-            "names it and its command line claims no other data dir",
+            "names it, it predates that record, and its command line claims no other "
+            "data dir",
             pid,
             _local_data_dir(),
         )
