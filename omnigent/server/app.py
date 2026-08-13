@@ -99,6 +99,7 @@ from omnigent.stores.permission_store import PermissionStore
 from omnigent.stores.policy_store import PolicyStore
 from omnigent.stores.project_store import ProjectStore
 from omnigent.stores.scheduled_task_store import ScheduledTaskStore
+from omnigent.stores.session_artifact_store import SessionArtifactStore
 
 _logger = logging.getLogger(__name__)
 
@@ -906,6 +907,7 @@ def create_app(
     conversation_store: ConversationStore,
     artifact_store: ArtifactStore,
     agent_cache: AgentCache,
+    session_artifact_store: SessionArtifactStore | None = None,
     runner_tunnel_tokens: frozenset[str] | None = None,
     comment_store: CommentStore | None = None,
     policy_store: PolicyStore | None = None,
@@ -941,6 +943,8 @@ def create_app(
         file content).
     :param agent_cache: Cache for loaded agent specs and working
         directories.
+    :param session_artifact_store: Store for published session-artifact
+        metadata. ``None`` leaves the artifact endpoints answering 501.
     :param runner_tunnel_tokens: Optional allow-list of binding
         tokens accepted by the runner WebSocket tunnel route, e.g.
         ``frozenset({"uA6Zz..."})``. ``None`` accepts any
@@ -2197,6 +2201,7 @@ def create_app(
             agent_store,
             file_store=file_store,
             artifact_store=artifact_store,
+            session_artifact_store=session_artifact_store,
             runner_router=runner_router,
             auth_provider=auth_provider,
             permission_store=permission_store,

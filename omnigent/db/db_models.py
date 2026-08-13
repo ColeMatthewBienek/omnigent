@@ -352,6 +352,63 @@ class SqlFile(OmnigentBase):
     )
 
 
+class SqlSessionArtifact(OmnigentBase):
+    """
+    SQLAlchemy model for the ``session_artifacts`` table.
+
+    Each row is one agent-published artifact — a finished work product a
+    human reviews in the session UI. Bytes live in the artifact store
+    under the row's ``id``; this table is the metadata.
+
+    ``render_category`` is deliberately NOT a column: it is derived from
+    ``content_type`` on read (see
+    :meth:`omnigent.entities.SessionArtifact.render_category`) so the
+    mapping cannot drift from the bytes' declared type.
+
+    :param id: Unique artifact identifier.
+    :param session_id: Owning session/conversation id.
+    :param filename: Original filename, e.g. ``"final_cut.mp4"``.
+    :param content_type: Resolved MIME type, e.g. ``"video/mp4"``.
+    :param bytes: Content size in bytes.
+    :param created_at: Unix epoch seconds when the artifact was published.
+    :param title: Optional human-facing title.
+    :param description: Optional human-facing description.
+    :param preview_artifact_id: Optional id of a sibling artifact that
+        previews this one, e.g. a poster frame for a video.
+    """
+
+    __tablename__ = "session_artifacts"
+
+    # Tenant partition key: Databricks workspace id owning this row (0 = default). Part of the PK.
+    workspace_id: Mapped[int] = mapped_column(
+        BigInteger,
+        primary_key=True,
+        nullable=False,
+        server_default="0",
+        default=current_workspace_id,
+    )
+    id: Mapped[str] = mapped_column(Uuid16(), primary_key=True)
+    session_id: Mapped[str] = mapped_column(Uuid16())
+    created_at: Mapped[int] = mapped_column(Integer)
+    filename: Mapped[str] = mapped_column(String(512))
+    content_type: Mapped[str] = mapped_column(String(256))
+    bytes: Mapped[int] = mapped_column(Integer)
+    title: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    description: Mapped[str | None] = mapped_column(String(2048), nullable=True)
+    preview_artifact_id: Mapped[str | None] = mapped_column(Uuid16(), nullable=True)
+
+    __table_args__ = (
+        # Artifacts are only ever listed per session, newest first.
+        Index(
+            "ix_session_artifacts_session_id_created_at",
+            "workspace_id",
+            "session_id",
+            "created_at",
+            "id",
+        ),
+    )
+
+
 class SqlUser(OmnigentBase):
     """
     SQLAlchemy model for the ``users`` table.

@@ -139,6 +139,28 @@ def copy_file_count_limit() -> int:
     return _config_positive_int("copy_max_files", MAX_COPY_FILES)
 
 
+def artifact_media_bytes_limit() -> int:
+    """Max byte size of a published video/audio artifact.
+
+    Config key ``artifact_max_media_bytes``; defaults to
+    :data:`omnigent.runtime.session_artifacts.MAX_MEDIA_ARTIFACT_BYTES`.
+    """
+    from omnigent.runtime.session_artifacts import MAX_MEDIA_ARTIFACT_BYTES
+
+    return _config_positive_int("artifact_max_media_bytes", MAX_MEDIA_ARTIFACT_BYTES)
+
+
+def artifact_html_bytes_limit() -> int:
+    """Max byte size of a published HTML artifact.
+
+    Config key ``artifact_max_html_bytes``; defaults to
+    :data:`omnigent.runtime.session_artifacts.MAX_HTML_ARTIFACT_BYTES`.
+    """
+    from omnigent.runtime.session_artifacts import MAX_HTML_ARTIFACT_BYTES
+
+    return _config_positive_int("artifact_max_html_bytes", MAX_HTML_ARTIFACT_BYTES)
+
+
 def copy_total_bytes_limit() -> int:
     """Max summed byte size a single copy-at-spawn request may copy.
 
