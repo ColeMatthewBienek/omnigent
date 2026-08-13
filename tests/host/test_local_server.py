@@ -324,6 +324,9 @@ def test_stop_local_omnigent_server_waits_for_process_exit(
     monkeypatch.setenv("OMNIGENT_DATA_DIR", str(tmp_path))
     # Synthetic pid: stand in for its identity and argv so the ownership
     # check has something to verify against.
+    # Synthetic pid: exercise the portable recheck-then-kill path, since a
+    # pid that does not exist cannot be pinned to a pidfd.
+    monkeypatch.setattr(local_server, "_PIDFD_AVAILABLE", False)
     monkeypatch.setattr(
         local_server,
         "_process_identity",
@@ -393,6 +396,9 @@ def test_stop_local_omnigent_server_escalates_to_sigkill(
     monkeypatch.setenv("OMNIGENT_DATA_DIR", str(tmp_path))
     # Synthetic pid: stand in for its identity and argv so the ownership
     # check has something to verify against.
+    # Synthetic pid: exercise the portable recheck-then-kill path, since a
+    # pid that does not exist cannot be pinned to a pidfd.
+    monkeypatch.setattr(local_server, "_PIDFD_AVAILABLE", False)
     monkeypatch.setattr(
         local_server,
         "_process_identity",
@@ -536,6 +542,9 @@ def test_stop_signals_a_server_spawned_for_this_data_dir(
     monkeypatch.setenv("OMNIGENT_DATA_DIR", str(tmp_path))
     alive = [True]
     monkeypatch.setattr(local_server, "_pid_alive", lambda pid: alive[0])
+    # Synthetic pid: exercise the portable recheck-then-kill path, since a
+    # pid that does not exist cannot be pinned to a pidfd.
+    monkeypatch.setattr(local_server, "_PIDFD_AVAILABLE", False)
     monkeypatch.setattr(
         local_server,
         "_process_identity",
@@ -586,6 +595,9 @@ def test_stop_signals_a_foreground_server_with_no_data_dir_marker(
     monkeypatch.setenv("OMNIGENT_DATA_DIR", str(tmp_path))
     alive = [True]
     monkeypatch.setattr(local_server, "_pid_alive", lambda pid: alive[0])
+    # Synthetic pid: exercise the portable recheck-then-kill path, since a
+    # pid that does not exist cannot be pinned to a pidfd.
+    monkeypatch.setattr(local_server, "_PIDFD_AVAILABLE", False)
     monkeypatch.setattr(
         local_server,
         "_process_identity",
@@ -667,6 +679,9 @@ def test_stop_refuses_when_the_command_line_cannot_be_read(
     # No data_dir field: the pre-upgrade record layout.
     pid_file = _record(tmp_path, 4242, create_time="", data_dir="")
     signalled = _refuse_fixture(monkeypatch, tmp_path)
+    # Synthetic pid: exercise the portable recheck-then-kill path, since a
+    # pid that does not exist cannot be pinned to a pidfd.
+    monkeypatch.setattr(local_server, "_PIDFD_AVAILABLE", False)
     monkeypatch.setattr(
         local_server,
         "_process_identity",
@@ -691,6 +706,9 @@ def test_stop_refuses_a_relative_artifact_location(
     """
     pid_file = _record(tmp_path, 4242, create_time="", data_dir="")
     signalled = _refuse_fixture(monkeypatch, tmp_path)
+    # Synthetic pid: exercise the portable recheck-then-kill path, since a
+    # pid that does not exist cannot be pinned to a pidfd.
+    monkeypatch.setattr(local_server, "_PIDFD_AVAILABLE", False)
     monkeypatch.setattr(
         local_server,
         "_process_identity",
@@ -760,6 +778,9 @@ def test_terminate_refuses_when_the_pid_is_recycled_before_the_signal(
     can exit in between and have its pid handed to something else. Pinning
     the identity once up front would signal that stranger.
     """
+    # Synthetic pid: exercise the portable recheck-then-kill path, since a
+    # pid that does not exist cannot be pinned to a pidfd.
+    monkeypatch.setattr(local_server, "_PIDFD_AVAILABLE", False)
     verified = local_server._ProcessIdentity(pid=4242, create_time=1.0)
     monkeypatch.setattr(local_server, "_pid_alive", lambda pid: True)
     # By the time we signal, the pid belongs to a process that started later.
@@ -786,6 +807,9 @@ def test_terminate_rechecks_identity_again_before_escalating_to_sigkill(
     """
     import signal as signal_mod
 
+    # Synthetic pid: exercise the portable recheck-then-kill path, since a
+    # pid that does not exist cannot be pinned to a pidfd.
+    monkeypatch.setattr(local_server, "_PIDFD_AVAILABLE", False)
     verified = local_server._ProcessIdentity(pid=4242, create_time=1.0)
     monkeypatch.setattr(local_server, "_pid_alive", lambda pid: True)
     monkeypatch.setattr(local_server.time, "sleep", lambda _s: None)
@@ -830,6 +854,9 @@ def test_stop_untracked_refuses_without_ownership_evidence(
     monkeypatch.setattr("httpx.get", _healthy)
     monkeypatch.setattr(local_server, "subprocess", _fake_subprocess(stdout="93359\n"))
     monkeypatch.setattr(local_server, "_pid_alive", lambda pid: True)
+    # Synthetic pid: exercise the portable recheck-then-kill path, since a
+    # pid that does not exist cannot be pinned to a pidfd.
+    monkeypatch.setattr(local_server, "_PIDFD_AVAILABLE", False)
     monkeypatch.setattr(
         local_server,
         "_process_identity",
@@ -869,6 +896,210 @@ def test_omnigent_server_cmdline_match_is_anchored_to_the_entrypoint(
     assert not local_server._is_omnigent_server_cmdline(["/opt/bin/omnigent", "run"])
 
 
+@pytest.mark.parametrize(
+    ("body", "why"),
+    [
+        ("4242\n8000\n1.0\n", "three lines: half-written extended record"),
+        ("4242\n8000\nnot-a-time\n/tmp/data\n", "unparseable start time"),
+        ("4242\n8000\n1.0\n\n", "empty data dir"),
+        ("4242\n8000\n1.0\nrelative/dir\n", "relative data dir"),
+        ("4242\n8000\n1.0\n/tmp/data\nextra\n", "trailing junk"),
+    ],
+)
+def test_stop_refuses_a_corrupt_extended_record(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    body: str,
+    why: str,
+) -> None:
+    """Partial evidence is corrupt evidence, never "no evidence".
+
+    Dropping an invalid start time would leave a data dir line that matches
+    ours — and that alone would authorize a kill against a pid nothing has
+    pinned. Every malformed shape must refuse instead.
+    """
+    pid_file = tmp_path / "local_server.pid"
+    pid_file.write_text(body.replace("/tmp/data", str(tmp_path)))
+    signalled = _refuse_fixture(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        local_server,
+        "_process_identity",
+        lambda pid: local_server._ProcessIdentity(pid=pid, create_time=1.0),
+    )
+    monkeypatch.setattr(
+        local_server,
+        "_process_cmdline",
+        lambda pid: ["omnigent", "server", "--artifact-location", str(tmp_path / "artifacts")],
+    )
+
+    local_server.stop_local_omnigent_server()
+
+    assert signalled == [], f"signalled despite {why}"
+    # The record is preserved for diagnosis rather than deleted.
+    assert not pid_file.exists()
+    assert (tmp_path / "local_server.pid.corrupt").read_text() == pid_file_body(body, tmp_path)
+
+
+def pid_file_body(body: str, tmp_path: Path) -> str:
+    """Return *body* with the data dir placeholder substituted.
+
+    :param body: Raw record text with a ``/tmp/data`` placeholder.
+    :param tmp_path: The test's data dir.
+    :returns: The text as written to disk.
+    """
+    return body.replace("/tmp/data", str(tmp_path))
+
+
+def test_stop_still_works_for_a_legacy_foreground_record(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A pre-upgrade record for a foreground server stays stoppable.
+
+    Such a record carries no evidence and the server's argv names no data
+    dir, so a strict reading would strand it forever — a regression in a
+    normal, non-test stop flow. The pidfile's own location in THIS data dir
+    is the evidence, accepted only for an exactly-valid legacy record whose
+    argv claims no other data dir. Removed in 0.11.0.
+    """
+    pid_file = tmp_path / "local_server.pid"
+    pid_file.write_text("4242\n8000\n")
+    monkeypatch.setenv("OMNIGENT_DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(local_server, "_PIDFD_AVAILABLE", False)
+    monkeypatch.setattr(
+        local_server,
+        "_process_identity",
+        lambda pid: local_server._ProcessIdentity(pid=pid, create_time=1.0),
+    )
+    monkeypatch.setattr(
+        local_server,
+        "_process_cmdline",
+        lambda pid: ["/opt/bin/omnigent", "server", "--port", "6767"],
+    )
+    signalled: list[int] = []
+    alive = [True]
+    monkeypatch.setattr(local_server, "_pid_alive", lambda pid: alive[0])
+
+    def _fake_kill(pid: int, sig: int) -> None:
+        signalled.append(sig)
+        alive[0] = False
+
+    monkeypatch.setattr(local_server.os, "kill", _fake_kill)
+
+    local_server.stop_local_omnigent_server()
+
+    assert signalled == [signal.SIGTERM]
+    assert not pid_file.exists()
+
+
+def test_legacy_record_does_not_authorize_another_data_dirs_server(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The legacy route never overrides an argv that names another data dir.
+
+    A stale legacy record can outlive a change of ``OMNIGENT_DATA_DIR``; if
+    the process it names is demonstrably serving somewhere else, that
+    demonstration wins.
+    """
+    pid_file = tmp_path / "local_server.pid"
+    pid_file.write_text("4242\n8000\n")
+    signalled = _refuse_fixture(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        local_server,
+        "_process_identity",
+        lambda pid: local_server._ProcessIdentity(pid=pid, create_time=1.0),
+    )
+    monkeypatch.setattr(
+        local_server,
+        "_process_cmdline",
+        lambda pid: [
+            "/opt/bin/omnigent",
+            "server",
+            "--artifact-location",
+            "/home/someone-else/.omnigent/artifacts",
+        ],
+    )
+
+    local_server.stop_local_omnigent_server()
+
+    assert signalled == []
+    assert pid_file.exists()
+
+
+@pytest.mark.skipif(
+    not local_server._PIDFD_AVAILABLE, reason="requires pidfd (Linux 5.3+ / CPython 3.9+)"
+)
+def test_terminate_signals_through_a_pidfd_when_available(tmp_path: Path) -> None:
+    """On Linux the signal goes through a fd that pins the process.
+
+    Once a pidfd refers to a process it keeps referring to that exact
+    process, so the last window between the identity recheck and the kill
+    is closed: a pid recycled in that instant cannot be reached through the
+    fd. Uses a real child so the pidfd machinery itself is exercised.
+    """
+    proc = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        identity = local_server._process_identity(proc.pid)
+        assert identity is not None
+
+        with local_server._signal_target(proc.pid, identity) as target:
+            assert target is not None
+            assert target.pinned, "expected a pidfd-pinned target on this platform"
+            assert target.send(signal.SIGTERM) is True
+
+        proc.wait(timeout=10)
+        assert proc.returncode is not None
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=10)
+
+
+@pytest.mark.skipif(
+    not local_server._PIDFD_AVAILABLE, reason="requires pidfd (Linux 5.3+ / CPython 3.9+)"
+)
+def test_signal_target_refuses_when_the_process_cannot_be_pinned() -> None:
+    """A pid that cannot be pinned is an anomaly, not a licence to kill.
+
+    ``_pid_alive`` said yes and the pidfd says no such process: something is
+    inconsistent, and the conservative answer is to signal nothing.
+    """
+    identity = local_server._ProcessIdentity(pid=2147483646, create_time=1.0)
+
+    with local_server._signal_target(identity.pid, identity) as target:
+        assert target is None
+
+
+def test_omnigent_server_subcommand_must_be_in_the_subcommand_position() -> None:
+    """``server`` appearing as an option value is not the subcommand.
+
+    ``omnigent run --brain server`` contains the word but is not a server;
+    accepting it would authorize killing an entirely different process.
+    """
+    assert local_server._is_omnigent_server_cmdline(["/opt/bin/omnigent", "server", "--port", "1"])
+    assert local_server._is_omnigent_server_cmdline(
+        ["/usr/bin/python", "-m", "omnigent.cli", "server"]
+    )
+    # "server" as a flag value, not the subcommand.
+    assert not local_server._is_omnigent_server_cmdline(
+        ["/opt/bin/omnigent", "run", "--brain", "server"]
+    )
+    assert not local_server._is_omnigent_server_cmdline(
+        ["/usr/bin/python", "-m", "omnigent.cli", "run", "--harness", "server"]
+    )
+    # A different subcommand entirely.
+    assert not local_server._is_omnigent_server_cmdline(["/opt/bin/omnigent", "run"])
+    # Not an Omnigent entrypoint at all, however suggestive the path.
+    assert not local_server._is_omnigent_server_cmdline(
+        ["/home/dev/omnigent/.venv/bin/python", "-c", "server"]
+    )
+
+
 def test_local_server_paths_follow_a_data_dir_set_after_import(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -896,9 +1127,41 @@ def test_local_server_paths_follow_a_data_dir_set_after_import(
     assert local_server._local_server_log_ref_path() == second / "local_server.logpath"
 
 
-def test_local_data_dir_honors_data_dir_not_config_home(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def _resolve_data_dir_in_subprocess(env_overrides: dict[str, str | None]) -> str:
+    """Resolve ``_local_data_dir`` in a child process and return the path.
+
+    The session guard forbids resolving the developer's real data dir, and
+    it is deliberately not switchable off in-process — so a test that needs
+    to observe unguarded HOME-based resolution asks a child, whose
+    environment it controls completely, and which never touches the path it
+    prints.
+
+    :param env_overrides: Environment changes for the child; a ``None``
+        value removes the variable.
+    :returns: The data dir the child resolved, as a string.
+    """
+    env = dict(os.environ)
+    for key, value in env_overrides.items():
+        if value is None:
+            env.pop(key, None)
+        else:
+            env[key] = value
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from omnigent.host.local_server import _local_data_dir; print(_local_data_dir())",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+        env=env,
+        cwd=Path(__file__).resolve().parents[2],
+    )
+    return result.stdout.strip()
+
+
+def test_local_data_dir_honors_data_dir_not_config_home(tmp_path: Path) -> None:
     """``_local_data_dir`` isolates the runtime DB via ``OMNIGENT_DATA_DIR`` only.
 
     Two worktrees sharing ``~/.omnigent/chat.db`` with divergent Alembic
@@ -907,23 +1170,26 @@ def test_local_data_dir_honors_data_dir_not_config_home(
     ``OMNIGENT_CONFIG_HOME`` MUST NOT move the DB — it isolates config only;
     overloading it broke HOME-based data isolation (the resumption e2e tests
     set ``HOME`` to control the DB while inheriting a shared CONFIG_HOME).
+
+    Runs in a child process with ``HOME`` pointed at a tmp dir: the default
+    branch resolves ``~/.omnigent``, which this process is forbidden to
+    resolve and must never touch.
     """
-    # This test asserts resolution semantics without touching the directory,
-    # so it opts out of the session guard that fails any resolution landing
-    # on the real ~/.omnigent (tests/conftest.py). Nothing here reads or
-    # writes the path.
-    monkeypatch.setattr(local_server, "_data_dir_guard", None)
-    monkeypatch.delenv("OMNIGENT_DATA_DIR", raising=False)
-    monkeypatch.delenv("OMNIGENT_CONFIG_HOME", raising=False)
-    # Default: ~/.omnigent.
-    assert local_server._local_data_dir() == Path.home() / ".omnigent"
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    base = {"HOME": str(fake_home), "OMNIGENT_DATA_DIR": None, "OMNIGENT_CONFIG_HOME": None}
+
+    # Default: <home>/.omnigent.
+    assert _resolve_data_dir_in_subprocess(base) == str(fake_home / ".omnigent")
     # CONFIG_HOME does NOT move the data dir — a failure here means config
     # isolation is leaking back into data-dir selection.
-    monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(tmp_path / "cfg"))
-    assert local_server._local_data_dir() == Path.home() / ".omnigent"
+    assert _resolve_data_dir_in_subprocess(
+        {**base, "OMNIGENT_CONFIG_HOME": str(tmp_path / "cfg")}
+    ) == str(fake_home / ".omnigent")
     # DATA_DIR is the data-isolation knob.
-    monkeypatch.setenv("OMNIGENT_DATA_DIR", str(tmp_path / "data"))
-    assert local_server._local_data_dir() == tmp_path / "data"
+    assert _resolve_data_dir_in_subprocess(
+        {**base, "OMNIGENT_DATA_DIR": str(tmp_path / "data")}
+    ) == str(tmp_path / "data")
 
 
 def test_pick_local_port_returns_preferred_when_free() -> None:
@@ -1247,6 +1513,9 @@ def test_stop_untracked_local_server_kills_orphan_on_default_port(
     # Synthetic pid: stand in for its identity and argv. The sweep has no
     # record to appeal to, so the argv must name THIS data dir.
     monkeypatch.setenv("OMNIGENT_DATA_DIR", str(tmp_path))
+    # Synthetic pid: exercise the portable recheck-then-kill path, since a
+    # pid that does not exist cannot be pinned to a pidfd.
+    monkeypatch.setattr(local_server, "_PIDFD_AVAILABLE", False)
     monkeypatch.setattr(
         local_server,
         "_process_identity",
@@ -1314,6 +1583,9 @@ def test_stop_untracked_local_server_noop_for_another_data_dirs_server(
     monkeypatch.setattr("httpx.get", _healthy)
     monkeypatch.setattr(local_server, "subprocess", _fake_subprocess(stdout="93359\n"))
     monkeypatch.setattr(local_server, "_pid_alive", lambda pid: True)
+    # Synthetic pid: exercise the portable recheck-then-kill path, since a
+    # pid that does not exist cannot be pinned to a pidfd.
+    monkeypatch.setattr(local_server, "_PIDFD_AVAILABLE", False)
     monkeypatch.setattr(
         local_server,
         "_process_identity",

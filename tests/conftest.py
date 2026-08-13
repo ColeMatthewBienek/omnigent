@@ -7,6 +7,7 @@ import sys
 import time
 from collections.abc import Generator
 from pathlib import Path
+from types import ModuleType
 
 import pytest
 
@@ -279,6 +280,36 @@ def pytest_addoption(parser):
     )
 
 
+def _installed_data_dir_guard(resolved: Path) -> None:
+    """The hook installed into :func:`_local_data_dir` for the whole session.
+
+    :param resolved: The data dir the resolver is about to hand out.
+    :returns: None.
+    :raises AssertionError: If it is the developer's real data dir.
+    """
+    _reject_real_data_dir(resolved, "a test")
+
+
+class _SealedGuardModule(ModuleType):
+    """Module type that refuses to let its data-dir guard be removed.
+
+    Installed over ``omnigent.host.local_server`` for the test session.
+    Every other attribute stays freely patchable — tests monkeypatch
+    ``_pid_alive``, ``_process_cmdline`` and friends constantly — but the
+    guard itself is not something an individual test gets to switch off.
+    """
+
+    def __setattr__(self, name: str, value: object) -> None:
+        if name == "_data_dir_guard" and value is not _installed_data_dir_guard:
+            raise AssertionError(
+                "Refusing to disarm the runtime data-dir guard. A test that needs "
+                "unguarded resolution must run it in a subprocess with its own "
+                "environment (see tests/test_data_dir_isolation.py), not switch the "
+                "guard off for the rest of the session."
+            )
+        super().__setattr__(name, value)
+
+
 @pytest.fixture(scope="session", autouse=True)
 def _isolate_omnigent_data_dir(
     tmp_path_factory: pytest.TempPathFactory,
@@ -312,13 +343,22 @@ def _isolate_omnigent_data_dir(
     # before teardown would otherwise do its damage unseen. The hook fires
     # inside _local_data_dir itself, so it covers callers that imported the
     # function by name too.
-    monkeypatch.setattr(
-        local_server,
-        "_data_dir_guard",
-        lambda resolved: _reject_real_data_dir(resolved, "a test"),
-    )
-    yield
-    monkeypatch.undo()
+    local_server._data_dir_guard = _installed_data_dir_guard
+    original_class = type(local_server)
+    # Seal the hook. Without this, "monkeypatch.setattr(local_server,
+    # '_data_dir_guard', None)" is a one-line escape from the very check
+    # that makes the suite safe — do the damage, restore, pass the boundary
+    # check. Sealing turns that bypass into an immediate error at the
+    # assignment. Tests that genuinely need unguarded resolution run it in a
+    # subprocess (tests/test_data_dir_isolation.py) rather than disarming
+    # the guard for everyone.
+    local_server.__class__ = _SealedGuardModule
+    try:
+        yield
+    finally:
+        local_server.__class__ = original_class
+        local_server._data_dir_guard = None
+        monkeypatch.undo()
 
 
 def _reject_real_data_dir(candidate: Path, context: str) -> None:
@@ -362,6 +402,26 @@ def assert_isolated_data_dir(nodeid: str, when: str) -> None:
     _reject_real_data_dir(_local_data_dir(), f"{nodeid} ({when} the test)")
 
 
+def _assert_guard_installed(nodeid: str, when: str) -> None:
+    """Assert the in-resolution guard is still armed.
+
+    Belt to the seal's braces: if some path ever manages to replace the
+    hook, the next test boundary says so instead of the suite quietly
+    running unguarded.
+
+    :param nodeid: The test being checked.
+    :param when: Where in the lifecycle the check runs.
+    :returns: None.
+    :raises AssertionError: If the hook is missing or not ours.
+    """
+    from omnigent.host import local_server
+
+    assert local_server._data_dir_guard is _installed_data_dir_guard, (
+        f"the runtime data-dir guard was not installed {when} {nodeid}; the suite "
+        f"would run without mid-test isolation enforcement"
+    )
+
+
 @pytest.fixture(autouse=True)
 def _guard_real_omnigent_data_dir(request: pytest.FixtureRequest) -> Generator[None, None, None]:
     """
@@ -381,8 +441,10 @@ def _guard_real_omnigent_data_dir(request: pytest.FixtureRequest) -> Generator[N
     :returns: None.
     :raises AssertionError: If the resolved data dir is the real one.
     """
+    _assert_guard_installed(request.node.nodeid, "before")
     assert_isolated_data_dir(request.node.nodeid, "before")
     yield
+    _assert_guard_installed(request.node.nodeid, "after")
     assert_isolated_data_dir(request.node.nodeid, "after")
 
 

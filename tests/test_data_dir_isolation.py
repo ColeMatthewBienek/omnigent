@@ -20,7 +20,11 @@ import pytest
 
 from omnigent import cli
 from omnigent.host import local_server
-from tests.conftest import _REAL_USER_DATA_DIR, assert_isolated_data_dir
+from tests.conftest import (
+    _REAL_USER_DATA_DIR,
+    _reject_real_data_dir,
+    assert_isolated_data_dir,
+)
 
 
 def test_session_fixture_redirects_the_data_dir_away_from_the_real_one() -> None:
@@ -73,74 +77,63 @@ def test_daemon_record_paths_are_never_import_time_constants() -> None:
     assert frozen == [], f"data-dir paths frozen at import: {frozen}"
 
 
-def test_guard_rejects_the_real_data_dir(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The guard trips when resolution lands on the developer's own dir.
+def test_guard_rejects_the_real_data_dir() -> None:
+    """The canonical check rejects the developer's own dir.
 
-    Only the path is resolved here — nothing reads or writes it — so the
-    check itself is safe to exercise against the real location.
+    Called directly with a crafted path: nothing here reads, writes, or
+    even resolves through the environment, so exercising it against the
+    real location is safe.
     """
-    monkeypatch.setattr(local_server, "_data_dir_guard", None)
-    monkeypatch.setenv("OMNIGENT_DATA_DIR", str(_REAL_USER_DATA_DIR))
-
     with pytest.raises(AssertionError, match="developer's real"):
-        assert_isolated_data_dir("tests/test_x.py::test_y", "before")
+        _reject_real_data_dir(_REAL_USER_DATA_DIR, "a test")
 
 
-def test_guard_rejects_a_noncanonical_path_to_the_real_data_dir(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_guard_rejects_a_noncanonical_path_to_the_real_data_dir() -> None:
     """``~/.omnigent/../.omnigent`` is the real dir wearing a disguise.
 
     A string comparison passes it straight through, which is why both sides
     are canonicalized before they are compared.
     """
-    monkeypatch.setattr(local_server, "_data_dir_guard", None)
-    disguised = _REAL_USER_DATA_DIR / ".." / ".omnigent"
-    monkeypatch.setenv("OMNIGENT_DATA_DIR", str(disguised))
-
     with pytest.raises(AssertionError, match="developer's real"):
-        assert_isolated_data_dir("tests/test_x.py::test_y", "before")
+        _reject_real_data_dir(_REAL_USER_DATA_DIR / ".." / ".omnigent", "a test")
 
 
-def test_guard_rejects_a_path_inside_the_real_data_dir(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_guard_rejects_a_path_inside_the_real_data_dir() -> None:
     """Writing under ``~/.omnigent`` is the same hazard as writing to it."""
-    monkeypatch.setattr(local_server, "_data_dir_guard", None)
-    monkeypatch.setenv("OMNIGENT_DATA_DIR", str(_REAL_USER_DATA_DIR / "scratch"))
-
     with pytest.raises(AssertionError, match="developer's real"):
-        assert_isolated_data_dir("tests/test_x.py::test_y", "before")
+        _reject_real_data_dir(_REAL_USER_DATA_DIR / "scratch" / "db", "a test")
 
 
-def test_guard_rejects_a_symlink_to_the_real_data_dir(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
+def test_guard_rejects_a_symlink_to_the_real_data_dir(tmp_path: Path) -> None:
     """A symlink is a second name for the same directory, and is caught."""
-    monkeypatch.setattr(local_server, "_data_dir_guard", None)
     link = tmp_path / "sneaky"
     link.symlink_to(_REAL_USER_DATA_DIR, target_is_directory=True)
-    monkeypatch.setenv("OMNIGENT_DATA_DIR", str(link))
 
     with pytest.raises(AssertionError, match="developer's real"):
-        assert_isolated_data_dir("tests/test_x.py::test_y", "before")
+        _reject_real_data_dir(link, "a test")
 
 
-def test_guard_fails_when_the_data_dir_override_is_dropped(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_guard_accepts_a_lookalike_outside_the_real_data_dir(tmp_path: Path) -> None:
+    """A path that merely *starts* like the real one is not the real one.
+
+    Containment is checked on path components, so ``~/.omnigent-backup``
+    must not be swept up by a prefix comparison.
+    """
+    _reject_real_data_dir(Path(f"{_REAL_USER_DATA_DIR}-backup"), "a test")
+    _reject_real_data_dir(tmp_path / "data", "a test")
+
+
+def test_guard_rejects_the_home_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
     """Clearing the override falls back to ``~/.omnigent`` — also a failure.
 
     The likelier regression is not a test naming the real dir outright but
     a fixture that deletes ``OMNIGENT_DATA_DIR`` and lets ``Path.home()``
-    take over.
+    take over. The hook catches it at the resolution itself.
     """
-    monkeypatch.setattr(local_server, "_data_dir_guard", None)
     monkeypatch.delenv("OMNIGENT_DATA_DIR", raising=False)
 
     with pytest.raises(AssertionError, match="developer's real"):
-        assert_isolated_data_dir("tests/test_x.py::test_y", "after")
+        local_server._local_data_dir()
 
 
 def test_guard_fires_mid_test_at_the_moment_of_resolution(
@@ -158,6 +151,30 @@ def test_guard_fires_mid_test_at_the_moment_of_resolution(
 
     with pytest.raises(AssertionError, match="developer's real"):
         local_server._local_data_dir()
+
+
+def test_the_guard_cannot_be_disarmed_by_a_test(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Switching the hook off is itself an error, not an escape hatch.
+
+    Without this, the mid-test protection is one ``monkeypatch.setattr``
+    away from gone: disarm, resolve the real dir, restore, and the boundary
+    check at teardown sees nothing wrong. The module refuses the assignment
+    instead, so the bypass fails at the attempt.
+    """
+    with pytest.raises(AssertionError, match="Refusing to disarm"):
+        monkeypatch.setattr(local_server, "_data_dir_guard", None)
+
+    # Still armed afterwards.
+    assert local_server._data_dir_guard is not None
+    monkeypatch.setenv("OMNIGENT_DATA_DIR", str(_REAL_USER_DATA_DIR))
+    with pytest.raises(AssertionError, match="developer's real"):
+        local_server._local_data_dir()
+
+
+def test_the_guard_cannot_be_replaced_with_a_permissive_one() -> None:
+    """Nor swapped for a hook that waves everything through."""
+    with pytest.raises(AssertionError, match="Refusing to disarm"):
+        local_server._data_dir_guard = lambda resolved: None
 
 
 def test_guard_hook_is_installed_for_every_test() -> None:
