@@ -79,22 +79,48 @@ def _local_data_dir() -> Path:
     return Path.home() / ".omnigent"
 
 
-# Pidfile carrying the background local server's PID + port (two lines).
-# Read back by the CLI to discover the daemon-started server's URL.
-_LOCAL_SERVER_PID_PATH = _local_data_dir() / "local_server.pid"
+# Every path below is resolved per call, never at import. Binding them at
+# import freezes whatever ``OMNIGENT_DATA_DIR`` held when the module first
+# loaded, so a later override (a test fixture, a worktree shell) is ignored
+# and the process keeps operating on the real ``~/.omnigent`` — including
+# signalling the pid recorded there.
 
-# Sidecar carrying the config signature (resolved auth source) the
-# running local server was spawned under. Reuse is gated on this so a
-# config change (e.g. flipping OMNIGENT_AUTH_ENABLED) respawns the
-# server instead of silently reusing one in the old auth mode.
-_LOCAL_SERVER_SIG_PATH = _local_data_dir() / "local_server.sig"
 
-# Sidecar carrying the absolute path of the background server's captured
-# stdout/stderr log file (one line). Lets `server --background` / `server status`
-# point at the exact ``logs/server/server-*.log`` even when reusing a
-# server this invocation didn't spawn. Absent for a foreground
-# ``omnigent server`` (its logs stream to the terminal, not a file).
-_LOCAL_SERVER_LOG_REF_PATH = _local_data_dir() / "local_server.logpath"
+def _local_server_pid_path() -> Path:
+    """Return the pidfile carrying the local server's PID + port (two lines).
+
+    Read back by the CLI to discover the daemon-started server's URL.
+
+    :returns: e.g. ``Path("/home/alice/.omnigent/local_server.pid")``.
+    """
+    return _local_data_dir() / "local_server.pid"
+
+
+def _local_server_sig_path() -> Path:
+    """Return the config-signature sidecar path.
+
+    Carries the signature (resolved auth source) the running local server
+    was spawned under. Reuse is gated on this so a config change (e.g.
+    flipping ``OMNIGENT_AUTH_ENABLED``) respawns the server instead of
+    silently reusing one in the old auth mode.
+
+    :returns: e.g. ``Path("/home/alice/.omnigent/local_server.sig")``.
+    """
+    return _local_data_dir() / "local_server.sig"
+
+
+def _local_server_log_ref_path() -> Path:
+    """Return the log-path sidecar for the background server.
+
+    Carries the absolute path of the server's captured stdout/stderr log
+    file (one line), so ``server --background`` / ``server status`` can
+    point at the exact ``logs/server/server-*.log`` even when reusing a
+    server this invocation didn't spawn. Absent for a foreground
+    ``omnigent server`` (its logs stream to the terminal, not a file).
+
+    :returns: e.g. ``Path("/home/alice/.omnigent/local_server.logpath")``.
+    """
+    return _local_data_dir() / "local_server.logpath"
 
 
 def server_config_signature() -> str:
@@ -170,10 +196,11 @@ def _read_local_server_pid_file() -> tuple[int, int] | None:
 
     :returns: ``(pid, port)`` if well-formed, ``None`` otherwise.
     """
-    if not _LOCAL_SERVER_PID_PATH.exists():
+    pid_path = _local_server_pid_path()
+    if not pid_path.exists():
         return None
     try:
-        lines = _LOCAL_SERVER_PID_PATH.read_text().strip().splitlines()
+        lines = pid_path.read_text().strip().splitlines()
         if len(lines) < 2:
             return None
         return int(lines[0]), int(lines[1])
@@ -233,19 +260,19 @@ def _write_local_server_record(
         any stale log-ref sidecar is then removed so status never reports a
         log file that doesn't apply to the running server.
     """
-    _LOCAL_SERVER_PID_PATH.parent.mkdir(parents=True, exist_ok=True)
+    _local_server_pid_path().parent.mkdir(parents=True, exist_ok=True)
     # Write each file atomically (temp + os.replace) so a concurrent
     # connect/run reader never observes a half-written record — a torn read
     # would parse as malformed and trigger a needless respawn. Sig first:
     # both replaces are individually atomic, so once the pidfile (what reuse
     # keys on) appears, its sig is already fully in place.
-    _atomic_write(_LOCAL_SERVER_SIG_PATH, f"{sig}\n")
+    _atomic_write(_local_server_sig_path(), f"{sig}\n")
     if log_path is not None:
-        _atomic_write(_LOCAL_SERVER_LOG_REF_PATH, f"{log_path}\n")
+        _atomic_write(_local_server_log_ref_path(), f"{log_path}\n")
     else:
         with contextlib.suppress(OSError):
-            _LOCAL_SERVER_LOG_REF_PATH.unlink()
-    _atomic_write(_LOCAL_SERVER_PID_PATH, f"{pid}\n{port}\n")
+            _local_server_log_ref_path().unlink()
+    _atomic_write(_local_server_pid_path(), f"{pid}\n{port}\n")
 
 
 def _read_local_server_log_path() -> Path | None:
@@ -257,7 +284,7 @@ def _read_local_server_log_path() -> Path | None:
         record, or no server) or unreadable.
     """
     try:
-        text = _LOCAL_SERVER_LOG_REF_PATH.read_text().strip()
+        text = _local_server_log_ref_path().read_text().strip()
     except OSError:
         return None
     return Path(text) if text else None
@@ -298,7 +325,7 @@ def _read_local_server_sig() -> str | None:
         ``None`` if the sidecar is absent (legacy server) or unreadable.
     """
     try:
-        sig = _LOCAL_SERVER_SIG_PATH.read_text().strip()
+        sig = _local_server_sig_path().read_text().strip()
     except OSError:
         return None
     return sig or None
@@ -348,6 +375,108 @@ def _terminate_pid(pid: int) -> None:
         time.sleep(_STOP_POLL_INTERVAL_S)
 
 
+def _cmdline_option(cmdline: list[str], flag: str) -> str | None:
+    """Return the value of ``--flag value`` / ``--flag=value`` in *cmdline*.
+
+    :param cmdline: A process argv, e.g. ``["omnigent", "server", "--port", "6767"]``.
+    :param flag: The long option to look for, e.g. ``"--artifact-location"``.
+    :returns: The option's value, or ``None`` when the flag is absent.
+    """
+    prefix = f"{flag}="
+    for index, arg in enumerate(cmdline):
+        if arg == flag:
+            return cmdline[index + 1] if index + 1 < len(cmdline) else None
+        if arg.startswith(prefix):
+            return arg[len(prefix) :]
+    return None
+
+
+def _process_cmdline(pid: int) -> list[str] | None:
+    """Return *pid*'s argv, or ``None`` when it cannot be read.
+
+    :param pid: Process id to inspect, e.g. ``93359``.
+    :returns: The argv list, or ``None`` for a vanished process, another
+        user's process, or a platform that hides argv.
+    """
+    try:
+        return list(psutil.Process(pid).cmdline())
+    except (psutil.Error, OSError):
+        return None
+
+
+def _is_omnigent_server_cmdline(cmdline: list[str]) -> bool:
+    """Return whether *cmdline* is an ``omnigent server`` invocation.
+
+    Only two spawns ever claim the local-server record: the daemon's
+    ``python -m omnigent.cli server`` and a foreground ``omnigent server``
+    registering itself. Matching on the entrypoint AND the subcommand keeps
+    an interpreter that merely lives inside a path containing "omnigent"
+    (any checkout of this repo) from passing.
+
+    :param cmdline: A process argv.
+    :returns: ``True`` when the argv names an Omnigent server.
+    """
+    if "server" not in cmdline:
+        return False
+    if any(arg in {"omnigent.cli", "omnigent", "omni"} for arg in cmdline):
+        return True
+    return Path(cmdline[0]).name in {"omnigent", "omni"}
+
+
+def _recorded_server_is_ours(pid: int) -> bool:
+    """Return ``False`` when *pid* is provably NOT this data dir's server.
+
+    Defence in depth for the one place that signals a pid read off disk.
+    A record naming a server that belongs to a *different* data dir — the
+    developer's real ``~/.omnigent`` daemon while this process runs against
+    an isolated one — or a pid the OS recycled onto an unrelated program
+    must never be SIGTERMed.
+
+    Ownership is proven from the target's own argv, which the spawn path
+    stamps with this data dir (``--artifact-location <data_dir>/artifacts``).
+    The config signature cannot serve as the gate: the drift heal in
+    :func:`ensure_local_omnigent_server` stops a server precisely *because*
+    its signature no longer matches this invocation's.
+
+    Fails open on an argv we cannot read (another user's process, a
+    platform that hides argv): that proves nothing either way, and refusing
+    there would break the off-switch.
+
+    :param pid: The pid recorded in the local-server pidfile, e.g. ``93359``.
+    :returns: ``True`` when the pid may be signalled.
+    """
+    cmdline = _process_cmdline(pid)
+    if not cmdline:
+        return True
+    if not _is_omnigent_server_cmdline(cmdline):
+        _logger.warning(
+            "Refusing to stop pid %d recorded as the local server: it is not an "
+            "Omnigent server (%s)",
+            pid,
+            " ".join(cmdline[:3]),
+        )
+        return False
+    artifacts = _cmdline_option(cmdline, "--artifact-location")
+    if artifacts is None:
+        # A foreground `omnigent server` carries no data-dir marker in its
+        # argv — nothing to disprove, so it stays stoppable.
+        return True
+    recorded = Path(artifacts).expanduser()
+    if not recorded.is_absolute():
+        # A relative marker resolves against whatever cwd the spawn ran in,
+        # which this process need not share — it proves nothing.
+        return True
+    if recorded.resolve() == (_local_data_dir() / "artifacts").expanduser().resolve():
+        return True
+    _logger.warning(
+        "Refusing to stop pid %d recorded as the local server: it serves data dir %s, not %s",
+        pid,
+        recorded.parent,
+        _local_data_dir(),
+    )
+    return False
+
+
 def stop_local_omnigent_server() -> None:
     """Stop the daemon-owned background local server and clear its files.
 
@@ -364,18 +493,27 @@ def stop_local_omnigent_server() -> None:
     NOT visible here — :func:`stop_untracked_local_server` covers that, and
     the off-switch (``omnigent stop`` / ``server stop``) calls both.
 
+    Refuses to signal a pid the record does not prove is this data dir's
+    server (:func:`_recorded_server_is_ours`) — a foreign daemon or a
+    recycled pid is left alone, record and all.
+
     :returns: None.
     """
     existing = _read_local_server_pid_file()
     if existing is not None:
         pid, _port = existing
+        if not _recorded_server_is_ours(pid):
+            # Not ours to stop, and not ours to forget either: clearing the
+            # record would hand the next invocation a blank slate for a
+            # server that is still running.
+            return
         _terminate_pid(pid)
     with contextlib.suppress(OSError):
-        _LOCAL_SERVER_PID_PATH.unlink()
+        _local_server_pid_path().unlink()
     with contextlib.suppress(OSError):
-        _LOCAL_SERVER_SIG_PATH.unlink()
+        _local_server_sig_path().unlink()
     with contextlib.suppress(OSError):
-        _LOCAL_SERVER_LOG_REF_PATH.unlink()
+        _local_server_log_ref_path().unlink()
 
 
 @dataclass(frozen=True)
@@ -797,8 +935,9 @@ def stop_untracked_local_server(port: int = _DEFAULT_LOCAL_PORT) -> int | None:
     ``/health`` on the canonical loopback *port*, find its PID and terminate
     it. Call it AFTER :func:`stop_local_omnigent_server` so a normally-tracked
     server is already gone and ``/health`` no longer answers (this is a
-    no-op). Best-effort: returns ``None`` when nothing untracked is found or
-    ``lsof`` is unavailable.
+    no-op). Best-effort: returns ``None`` when nothing untracked is found,
+    ``lsof`` is unavailable, or the listener is provably another data dir's
+    server (:func:`_recorded_server_is_ours`).
 
     :param port: Canonical loopback port to sweep, e.g. ``6767``.
     :returns: The PID stopped, or ``None`` if there was nothing to stop.
@@ -808,6 +947,11 @@ def stop_untracked_local_server(port: int = _DEFAULT_LOCAL_PORT) -> int | None:
         return None
     pid = _pid_listening_on_port(port)
     if pid is None or not _pid_alive(pid):
+        return None
+    # Answering /health on the canonical port is not ownership: the server
+    # there may belong to another data dir (a second checkout, the
+    # developer's real ~/.omnigent). Same gate as the pidfile path.
+    if not _recorded_server_is_ours(pid):
         return None
     _terminate_pid(pid)
     return pid
@@ -845,11 +989,11 @@ def clear_local_server_record() -> None:
     existing = _read_local_server_pid_file()
     if existing is not None and existing[0] == os.getpid():
         with contextlib.suppress(OSError):
-            _LOCAL_SERVER_PID_PATH.unlink()
+            _local_server_pid_path().unlink()
         with contextlib.suppress(OSError):
-            _LOCAL_SERVER_SIG_PATH.unlink()
+            _local_server_sig_path().unlink()
         with contextlib.suppress(OSError):
-            _LOCAL_SERVER_LOG_REF_PATH.unlink()
+            _local_server_log_ref_path().unlink()
 
 
 def _wait_for_local_omnigent_server(
@@ -938,9 +1082,9 @@ def _raise_local_server_failed(base_url: str, log_path: Path) -> None:
     # A failed spawn leaves a misleading pidfile; clear it (and the sig
     # sidecar) so the next invocation does not try to reuse a dead entry.
     with contextlib.suppress(OSError):
-        _LOCAL_SERVER_PID_PATH.unlink()
+        _local_server_pid_path().unlink()
     with contextlib.suppress(OSError):
-        _LOCAL_SERVER_SIG_PATH.unlink()
+        _local_server_sig_path().unlink()
     raise click.ClickException(
         f"Background local server failed to start ({base_url}).\n"
         f"  Server log: {log_path}\n"

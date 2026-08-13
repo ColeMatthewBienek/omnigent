@@ -60,6 +60,13 @@ from tests import _model_pools
 
 pytest_plugins = ["tests._token_usage"]
 
+# The developer's real runtime data dir, captured at import — before any
+# fixture can patch ``HOME`` or ``OMNIGENT_DATA_DIR``. A live ``omnigent``
+# daemon records its pids here; a test that resolves to this directory can
+# read those pids and SIGTERM the user's own server, so
+# :func:`_guard_real_omnigent_data_dir` fails any test that does.
+_REAL_USER_DATA_DIR = Path(os.path.expanduser("~")) / ".omnigent"
+
 
 def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
     """Translate ``@pytest.mark.llm_flaky`` into a rerunfailures ``flaky``
@@ -270,6 +277,81 @@ def pytest_addoption(parser):
             "configured with the credentials/profile the test needs."
         ),
     )
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _isolate_omnigent_data_dir(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> Generator[None, None, None]:
+    """
+    Point the whole suite's runtime data dir at a throwaway directory.
+
+    ``~/.omnigent`` is live state on a developer machine: it holds the
+    ``host.pid`` / ``local_server.pid`` records of a *running* Omnigent
+    daemon and server. Test helpers reach ``ensure_local_omnigent_server``,
+    whose config-drift heal stops whatever server those records name — so a
+    suite run against the real data dir SIGTERMs the developer's server.
+    ``OMNIGENT_DATA_DIR`` redirects every one of those paths (they are all
+    resolved per call, never frozen at import), and the session scope means
+    the redirect is in place before the first test collects a fixture.
+
+    Session-scoped, so it uses its own :class:`pytest.MonkeyPatch` rather
+    than the function-scoped ``monkeypatch`` fixture. Tests that need a
+    different data dir still override the var themselves; the guard below
+    only objects to the *real* one.
+
+    :param tmp_path_factory: Pytest's session-scoped temp factory.
+    :returns: None.
+    """
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setenv("OMNIGENT_DATA_DIR", str(tmp_path_factory.mktemp("omnigent-data")))
+    yield
+    monkeypatch.undo()
+
+
+def assert_isolated_data_dir(nodeid: str, when: str) -> None:
+    """Assert the resolved runtime data dir is not the developer's real one.
+
+    :param nodeid: The test being checked, e.g. ``"tests/test_x.py::test_y"``.
+    :param when: Where in the test's lifecycle the check runs, e.g.
+        ``"before"``.
+    :returns: None.
+    :raises AssertionError: If the data dir resolves to
+        :data:`_REAL_USER_DATA_DIR`.
+    """
+    from omnigent.host.local_server import _local_data_dir
+
+    resolved = _local_data_dir().expanduser()
+    assert resolved != _REAL_USER_DATA_DIR, (
+        f"{nodeid} resolved the runtime data dir to the real "
+        f"{_REAL_USER_DATA_DIR} {when} the test. Tests must never read or "
+        f"write it: it holds a live daemon's pid records, and any helper that "
+        f"reaches ensure_local_omnigent_server() will stop the server they "
+        f"name. Set OMNIGENT_DATA_DIR to a tmp dir instead."
+    )
+
+
+@pytest.fixture(autouse=True)
+def _guard_real_omnigent_data_dir(request: pytest.FixtureRequest) -> Generator[None, None, None]:
+    """
+    Fail any test whose resolved data dir is the developer's real one.
+
+    :func:`_isolate_omnigent_data_dir` sets the redirect; this asserts it
+    actually took, on both sides of every test — a fixture that clears
+    ``OMNIGENT_DATA_DIR``, or a code path that stops honoring it, surfaces
+    as a failing test instead of a dead daemon.
+
+    Autouse fixtures run before explicitly-requested ones, so this checks
+    *outside* any ``monkeypatch`` a test applies: a test that inspects
+    home-based resolution inside its own body (and restores it) is fine.
+
+    :param request: Pytest request, used to name the offending test.
+    :returns: None.
+    :raises AssertionError: If the resolved data dir is the real one.
+    """
+    assert_isolated_data_dir(request.node.nodeid, "before")
+    yield
+    assert_isolated_data_dir(request.node.nodeid, "after")
 
 
 @pytest.fixture(autouse=True)
