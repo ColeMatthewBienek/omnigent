@@ -45,9 +45,7 @@ INLINE_RENDER_CATEGORIES: frozenset[str] = frozenset({"image", "video", "audio",
 
 _VIDEO_TYPES: frozenset[str] = frozenset({"video/mp4", "video/quicktime", "video/webm"})
 
-_AUDIO_TYPES: frozenset[str] = frozenset(
-    {"audio/mpeg", "audio/mp4", "audio/wav", "audio/ogg"}
-)
+_AUDIO_TYPES: frozenset[str] = frozenset({"audio/mpeg", "audio/mp4", "audio/wav", "audio/ogg"})
 
 # Equivalent spellings the platform ``mimetypes`` table (or a client) may
 # emit for an allowed type — e.g. Python maps ``.wav`` to ``audio/x-wav``.

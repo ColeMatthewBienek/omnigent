@@ -35,6 +35,7 @@ from omnigent.native_coding_agents import (
 )
 from omnigent.runner.routing import RunnerRouter
 from omnigent.runtime.policies.approval import _ELICITATION_MODE
+from omnigent.runtime.session_artifacts import INLINE_RENDER_CATEGORIES
 from omnigent.server._elicitation_registry import (
     _harness_elicitation_owners,
     _harness_elicitation_registry,
@@ -76,10 +77,10 @@ from omnigent.server.routes._sessions.helpers import (
     _if_none_match_matches,
     _inline_disposition,
     _load_agent_spec_for_session,
+    _parse_byte_range,
     _proxy_get_session_resources_to_runner,
     _publish_and_persist_resource_event,
     _publish_changed_files_invalidated,
-    _parse_byte_range,
     _RangeNotSatisfiable,
     _read_upload_capped,
     _session_artifact_to_resource,
@@ -99,9 +100,7 @@ from omnigent.stores import AgentStore, ConversationStore
 from omnigent.stores.artifact_store import ArtifactStore
 from omnigent.stores.file_store import FileStore
 from omnigent.stores.permission_store import PermissionStore
-from omnigent.runtime.session_artifacts import INLINE_RENDER_CATEGORIES
 from omnigent.stores.session_artifact_store import SessionArtifactStore
-
 
 # Chunk size for writing artifact bytes back to the client. The
 # ArtifactStore interface hands back a whole blob, so this bounds what a
@@ -1598,9 +1597,7 @@ def register_resources_routes(
             type_limit = artifact_html_bytes_limit()
 
         if preview_artifact_id is not None:
-            preview = await asyncio.to_thread(
-                artifacts.get, preview_artifact_id, session_id
-            )
+            preview = await asyncio.to_thread(artifacts.get, preview_artifact_id, session_id)
             if preview is None:
                 raise OmnigentError(
                     "preview_artifact_id does not name an artifact in this session",

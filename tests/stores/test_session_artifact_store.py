@@ -54,8 +54,21 @@ def test_get_scoped_to_owning_session(artifact_store: SqlAlchemySessionArtifactS
     assert artifact_store.get(created.id, session_id=_OTHER_SID) is None
 
 
-def test_list_is_newest_first(artifact_store: SqlAlchemySessionArtifactStore) -> None:
-    """Listing returns the session's artifacts newest-first."""
+def test_list_is_newest_first(
+    artifact_store: SqlAlchemySessionArtifactStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Listing returns the session's artifacts newest-first.
+
+    ``created_at`` has one-second resolution, so the timestamps are forced
+    apart here — two artifacts published inside the same second fall back to
+    the id tie-break, which is arbitrary by design.
+    """
+    clock = iter([1000, 2000])
+    monkeypatch.setattr(
+        "omnigent.stores.session_artifact_store.sqlalchemy_store.now_epoch",
+        lambda: next(clock),
+    )
     first = artifact_store.create(
         session_id=_SID, filename="a.mp4", content_type="video/mp4", bytes=1
     )
@@ -96,12 +109,8 @@ def test_preview_reference_round_trips(artifact_store: SqlAlchemySessionArtifact
 
 def test_delete_all_for_session(artifact_store: SqlAlchemySessionArtifactStore) -> None:
     """Session teardown returns the ids so blob cleanup can follow."""
-    a = artifact_store.create(
-        session_id=_SID, filename="a.mp4", content_type="video/mp4", bytes=1
-    )
-    b = artifact_store.create(
-        session_id=_SID, filename="b.mp4", content_type="video/mp4", bytes=1
-    )
+    a = artifact_store.create(session_id=_SID, filename="a.mp4", content_type="video/mp4", bytes=1)
+    b = artifact_store.create(session_id=_SID, filename="b.mp4", content_type="video/mp4", bytes=1)
     deleted = artifact_store.delete_all_for_session(_SID)
     assert set(deleted) == {a.id, b.id}
     assert artifact_store.list(session_id=_SID).data == []

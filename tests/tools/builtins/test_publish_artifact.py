@@ -179,9 +179,7 @@ def test_preview_path_is_published_first_and_linked(
 
     result = json.loads(
         PublishArtifactTool().invoke(
-            json.dumps(
-                {"path": "renders/final_cut.mp4", "preview_path": "renders/poster.png"}
-            ),
+            json.dumps({"path": "renders/final_cut.mp4", "preview_path": "renders/poster.png"}),
             tool_ctx,
         )
     )
@@ -198,9 +196,7 @@ def test_rejects_a_path_escaping_the_workspace(
     """Containment matches upload_file: the read never leaves the workspace."""
     artifacts, _, _ = stores
 
-    result = PublishArtifactTool().invoke(
-        json.dumps({"path": "../outside.mp4"}), tool_ctx
-    )
+    result = PublishArtifactTool().invoke(json.dumps({"path": "../outside.mp4"}), tool_ctx)
 
     assert result.startswith("Error:")
     assert "escapes workspace" in result
@@ -244,13 +240,9 @@ def test_rejects_content_over_the_size_cap(
 ) -> None:
     """An over-cap artifact is refused before anything is stored."""
     artifacts, _, _ = stores
-    monkeypatch.setattr(
-        "omnigent.runtime.session_artifacts.artifact_upload_limit", lambda _ct: 8
-    )
+    monkeypatch.setattr("omnigent.runtime.session_artifacts.artifact_upload_limit", lambda _ct: 8)
 
-    result = PublishArtifactTool().invoke(
-        json.dumps({"path": "renders/final_cut.mp4"}), tool_ctx
-    )
+    result = PublishArtifactTool().invoke(json.dumps({"path": "renders/final_cut.mp4"}), tool_ctx)
 
     assert result.startswith("Error:")
     assert "exceeds" in result
@@ -275,7 +267,5 @@ def test_requires_a_session(
     ctx = ToolContext(
         task_id="task_001", agent_id="ag_001", workspace=workspace, conversation_id=None
     )
-    result = PublishArtifactTool().invoke(
-        json.dumps({"path": "renders/final_cut.mp4"}), ctx
-    )
+    result = PublishArtifactTool().invoke(json.dumps({"path": "renders/final_cut.mp4"}), ctx)
     assert result.startswith("Error:")

@@ -19,7 +19,6 @@ from fastapi.responses import JSONResponse
 from omnigent.errors import OmnigentError
 from omnigent.runtime import _globals, set_runner_client, set_runner_router
 from omnigent.server.routes.sessions import create_sessions_router
-
 from tests.server.routes.test_session_resources import (
     _ConversationStore,
     _InMemoryArtifactStore,
@@ -222,9 +221,7 @@ async def test_publish_links_a_preview_artifact(client: httpx.AsyncClient) -> No
     poster = await _publish(client, "poster.png", b"\x89PNG\r\n\x1a\n", "image/png")
     poster_id = poster.json()["id"]
 
-    video = await _publish(
-        client, "clip.mp4", _MP4, "video/mp4", preview_artifact_id=poster_id
-    )
+    video = await _publish(client, "clip.mp4", _MP4, "video/mp4", preview_artifact_id=poster_id)
     assert video.status_code == 201
     assert video.json()["metadata"]["preview_artifact_id"] == poster_id
 
@@ -261,9 +258,7 @@ async def test_content_404s_for_the_wrong_session(client: httpx.AsyncClient) -> 
     published = await _publish(client, "clip.mp4", _MP4, "video/mp4")
     artifact_id = published.json()["id"]
 
-    resp = await client.get(
-        f"/v1/sessions/{_OTHER_SID}/resources/artifacts/{artifact_id}/content"
-    )
+    resp = await client.get(f"/v1/sessions/{_OTHER_SID}/resources/artifacts/{artifact_id}/content")
     assert resp.status_code == 404
 
 
@@ -378,18 +373,14 @@ async def test_audio_and_image_are_served_inline(client: httpx.AsyncClient) -> N
     for filename, content_type in (("mix.mp3", "audio/mpeg"), ("chart.png", "image/png")):
         published = await _publish(client, filename, b"bytes-here", content_type)
         artifact_id = published.json()["id"]
-        resp = await client.get(
-            f"/v1/sessions/{_SID}/resources/artifacts/{artifact_id}/content"
-        )
+        resp = await client.get(f"/v1/sessions/{_SID}/resources/artifacts/{artifact_id}/content")
         assert resp.headers["content-disposition"].startswith("inline;"), filename
 
 
 @pytest.mark.asyncio
 async def test_html_is_always_served_as_an_attachment(client: httpx.AsyncClient) -> None:
     """Agent-authored HTML must never execute in the server's origin."""
-    published = await _publish(
-        client, "report.html", b"<script>alert(1)</script>", "text/html"
-    )
+    published = await _publish(client, "report.html", b"<script>alert(1)</script>", "text/html")
     artifact_id = published.json()["id"]
 
     resp = await client.get(f"/v1/sessions/{_SID}/resources/artifacts/{artifact_id}/content")
@@ -511,7 +502,5 @@ async def test_content_requires_read_access(authed_client_factory: Any) -> None:
         artifact_id = published.json()["id"]
 
     async with authed_client_factory("stranger@example.com") as stranger:
-        resp = await stranger.get(
-            f"/v1/sessions/{_SID}/resources/artifacts/{artifact_id}/content"
-        )
+        resp = await stranger.get(f"/v1/sessions/{_SID}/resources/artifacts/{artifact_id}/content")
         assert resp.status_code == 404

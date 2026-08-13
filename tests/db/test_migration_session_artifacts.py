@@ -72,7 +72,10 @@ def test_no_foreign_keys(db_engine: Engine) -> None:
 
 def test_session_listing_index_exists(db_engine: Engine) -> None:
     """The per-session, newest-first listing is served by a composite index."""
-    indexes = {i["name"]: i["column_names"] for i in sa.inspect(db_engine).get_indexes("session_artifacts")}
+    indexes = {
+        i["name"]: i["column_names"]
+        for i in sa.inspect(db_engine).get_indexes("session_artifacts")
+    }
     assert indexes["ix_session_artifacts_session_id_created_at"] == [
         "workspace_id",
         "session_id",

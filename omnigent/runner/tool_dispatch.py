@@ -82,6 +82,7 @@ from omnigent.tools.builtins.os_env import (
     SysOsShellTool,
     SysOsWriteTool,
 )
+from omnigent.tools.builtins.publish_artifact import PublishArtifactTool
 from omnigent.tools.builtins.session_rename import SysSessionRenameTool
 from omnigent.tools.builtins.spawn import (
     # Shared contract values with the in-process sys_session_* tools. Imported
@@ -107,7 +108,6 @@ from omnigent.tools.builtins.timer import (
     validate_timer_set_args,
 )
 from omnigent.tools.builtins.update_comment import UpdateCommentTool
-from omnigent.tools.builtins.publish_artifact import PublishArtifactTool
 from omnigent.tools.builtins.upload_file import UploadFileTool, safe_resolve
 
 _logger = logging.getLogger(__name__)
@@ -6010,9 +6010,7 @@ async def _execute_artifact_tool(
 
     try:
         resolved = safe_resolve(path, workspace)
-        preview_resolved = (
-            safe_resolve(preview_path, workspace) if preview_path else None
-        )
+        preview_resolved = safe_resolve(preview_path, workspace) if preview_path else None
     except ValueError as exc:
         return f"Error: publish_artifact failed: {exc}"
 
@@ -6044,7 +6042,8 @@ async def _execute_artifact_tool(
         published_preview = await _post(preview_resolved, {})
         if isinstance(published_preview, str):
             return published_preview
-        preview_artifact_id = published_preview.get("id")
+        preview_id = published_preview.get("id")
+        preview_artifact_id = preview_id if isinstance(preview_id, str) else None
 
     form: dict[str, str] = {}
     for key in ("title", "description"):
@@ -6057,7 +6056,8 @@ async def _execute_artifact_tool(
     published = await _post(resolved, form)
     if isinstance(published, str):
         return published
-    metadata = published.get("metadata") or {}
+    raw_metadata = published.get("metadata")
+    metadata: _JsonObject = raw_metadata if isinstance(raw_metadata, dict) else {}
     return json.dumps(
         {
             "artifact_id": published.get("id"),
@@ -6066,8 +6066,7 @@ async def _execute_artifact_tool(
             "render_category": metadata.get("render_category"),
             "bytes": metadata.get("bytes"),
             "title": metadata.get("title"),
-            "preview_artifact_id": metadata.get("preview_artifact_id")
-            or preview_artifact_id,
+            "preview_artifact_id": metadata.get("preview_artifact_id") or preview_artifact_id,
         }
     )
 
