@@ -9,6 +9,7 @@ import {
   PanelRightCloseIcon,
   PanelRightIcon,
   ShareIcon,
+  SparklesIcon,
   TerminalIcon,
   UserPlusIcon,
 } from "lucide-react";
@@ -52,6 +53,8 @@ interface MobileSessionMenuProps {
   subagentsPanelOpen: boolean;
   /** True while the mobile shells drawer is open. */
   shellsPanelOpen: boolean;
+  /** True while the artifacts drawer is open. */
+  artifactsPanelOpen: boolean;
   /** Hide the Shells entry (claude-native sub-agents only). */
   hideTerminalsTab: boolean;
   /** Whether the Shells entry is available. */
@@ -77,6 +80,10 @@ interface MobileSessionMenuProps {
   onOpenShells: () => void;
   /** Open the mobile agents drawer. */
   onOpenSubagents: () => void;
+  /** Open the artifacts drawer (agent-published work products). */
+  onOpenArtifacts: () => void;
+  /** Number of published artifacts (Artifacts entry badge). */
+  artifactCount: number;
   /** Open the main execution-log push panel. */
   onOpenMainExecutionLog: () => void;
 }
@@ -438,6 +445,7 @@ export function ChatHeader({
           !mobileMenu.filesPanelOpen &&
           !mobileMenu.subagentsPanelOpen &&
           !mobileMenu.shellsPanelOpen &&
+          !mobileMenu.artifactsPanelOpen &&
           (hasRailContent || mobileMenu.debugMode) && (
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
@@ -520,6 +528,21 @@ export function ChatHeader({
                     )}
                   </DropdownMenuItem>
                 )}
+                {/* Artifacts — the agent's published deliverables. Always
+                    reachable so the user can check for work even before the
+                    first one lands (the badge shows the count once it does). */}
+                <DropdownMenuItem
+                  onSelect={mobileMenu.onOpenArtifacts}
+                  className="gap-2.5 px-2.5 py-2 text-ui"
+                >
+                  <SparklesIcon className="size-4" />
+                  Artifacts
+                  {mobileMenu.artifactCount > 0 && (
+                    <span className={cn(TAB_BADGE_BASE, "ml-auto bg-muted text-muted-foreground")}>
+                      {mobileMenu.artifactCount}
+                    </span>
+                  )}
+                </DropdownMenuItem>
                 {mobileMenu.debugMode && (
                   <DropdownMenuItem
                     onSelect={mobileMenu.onOpenMainExecutionLog}

@@ -36,6 +36,7 @@ const mobileMenu = {
   filesPanelOpen: false,
   subagentsPanelOpen: false,
   shellsPanelOpen: false,
+  artifactsPanelOpen: false,
   hideTerminalsTab: false,
   showShellsTab: false,
   terminalsLength: 0,
@@ -47,6 +48,8 @@ const mobileMenu = {
   onOpenChanges: () => {},
   onOpenShells: () => {},
   onOpenSubagents: () => {},
+  onOpenArtifacts: () => {},
+  artifactCount: 0,
   onOpenMainExecutionLog: () => {},
 };
 

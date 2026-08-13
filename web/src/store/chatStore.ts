@@ -96,6 +96,12 @@ import type { Conversation, ConversationsPage } from "@/hooks/useConversations";
 import type { ConversationsInfiniteData } from "@/lib/sessionListCache";
 import { useTerminalActivityStore } from "./terminalActivity";
 import { terminalInfoFromResource, terminalsQueryKey, type TerminalInfo } from "@/lib/terminals";
+import {
+  artifactFromResource,
+  artifactsQueryKey,
+  compareArtifactsNewestFirst,
+  type SessionArtifact,
+} from "@/lib/artifacts";
 import type {
   ContentBlock,
   ModelUsage,
@@ -5671,6 +5677,9 @@ export function handleSessionEvent(event: StreamEvent, streamConversationId?: st
       if (event.resource.type === "terminal") {
         applyTerminalCreated(event.resource as unknown as Record<string, unknown>);
       }
+      if (event.resource.type === "session_artifact") {
+        applyArtifactCreated(event.resource as unknown as Record<string, unknown>);
+      }
       return;
     case "session_resource_deleted":
       if (event.resourceType === "terminal") {
@@ -5825,6 +5834,26 @@ function applyTerminalCreated(resource: Record<string, unknown>): void {
   const current = queryClient.getQueryData<TerminalInfo[]>(key) ?? [];
   if (current.some((t) => t.id === info.id)) return;
   queryClient.setQueryData<TerminalInfo[]>(key, [...current, info]);
+}
+
+/**
+ * Patch the artifacts query cache with a newly published artifact.
+ *
+ * Seeds a cold cache rather than skipping, so the list is already correct
+ * the first time the panel is opened after a publish — and stays correct
+ * while the panel is closed. Idempotent by id; ordering is newest-first.
+ */
+function applyArtifactCreated(resource: Record<string, unknown>): void {
+  const artifact = artifactFromResource(resource);
+  if (artifact === null) return;
+  if (queryClient === null) return;
+  const key = artifactsQueryKey(artifact.sessionId);
+  const current = queryClient.getQueryData<SessionArtifact[]>(key) ?? [];
+  if (current.some((a) => a.id === artifact.id)) return;
+  queryClient.setQueryData<SessionArtifact[]>(
+    key,
+    [...current, artifact].sort(compareArtifactsNewestFirst),
+  );
 }
 
 /**

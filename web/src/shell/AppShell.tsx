@@ -78,6 +78,8 @@ import { ChatHeader } from "./ChatHeader";
 import { ExecutionLogsPanel } from "./ExecutionLogsPanel";
 import { FileViewer } from "./FileViewer";
 import { FileViewerContext } from "./FileViewerContext";
+import { useSessionArtifacts } from "@/hooks/useSessionArtifacts";
+import { ArtifactsPanelDrawer } from "./ArtifactsPanelDrawer";
 import { FilesPanelDrawer } from "./FilesPanelDrawer";
 import type { ChangedSort } from "./FlatFileList";
 import { MobilePanelDrawer } from "./MobilePanelDrawer";
@@ -306,6 +308,10 @@ export function AppShell() {
   // on a phone they open as full-screen overlays from the session-menu FAB.
   const [subagentsPanelOpen, setSubagentsPanelOpen] = useState(false);
   const [shellsPanelOpen, setShellsPanelOpen] = useState(false);
+  // Artifacts — the agent's published deliverables. Responsive on its own
+  // (desktop right-rail push panel, mobile full-screen drawer), so unlike the
+  // drawers above it is not mobile-only.
+  const [artifactsPanelOpen, setArtifactsPanelOpen] = useState(false);
   // The right "Workspace" rail (WorkspacePanel) remembers its open/closed
   // state per session. A brand-new session (no saved `open`) follows the
   // Appearance "Workspace panel" default; reopening a session restores how
@@ -416,6 +422,10 @@ export function AppShell() {
   const sessionLabels = { ...activeConv?.labels, ...activeSession?.labels };
   const terminalFirst = sessionLabels["omnigent.ui"] === "terminal";
   const isClaudeNative = sessionLabels["omnigent.wrapper"] === "claude-code-native-ui";
+  // Seeds the artifacts cache on session load so the session-menu badge is
+  // right before the panel is ever opened; live publishes patch the same
+  // cache from the SSE handler.
+  const { artifacts } = useSessionArtifacts(conversationId ?? null);
   // Native-CLI wrapper of either family. Keys harness behavior gates
   // (composer slash commands, `/model`); terminal-first SDK sessions
   // (embedded Omnigent REPL terminal) have NO wrapper label and must
@@ -1353,6 +1363,18 @@ export function AppShell() {
     setShellsPanelOpen(true);
   }
 
+  // Session menu → "Artifacts" opens the published-artifacts panel.
+  function openArtifactsPanel() {
+    setSelectedFilePath(null); // close file viewer
+    clearFileViewerUrl();
+    setPanelInitialKey(null); // close terminals panel
+    setExecutionLogsKey(null); // close execution-logs panel
+    setFilesPanelOpen(false); // close files drawer
+    setSubagentsPanelOpen(false); // close mobile agents drawer
+    setShellsPanelOpen(false); // close mobile shells drawer
+    setArtifactsPanelOpen(true);
+  }
+
   function openMainExecutionLog() {
     // Mobile FAB → "Execution logs" jumps straight to the main thread.
     // Children are reachable via the panel's tab switcher.
@@ -1659,6 +1681,7 @@ export function AppShell() {
                     filesPanelOpen,
                     subagentsPanelOpen,
                     shellsPanelOpen,
+                    artifactsPanelOpen,
                     hideTerminalsTab,
                     // Mobile: reachable when a shell exists OR the agent
                     // declares shell access (so the drawer's "+ New shell" row
@@ -1675,6 +1698,8 @@ export function AppShell() {
                     onOpenChanges: openChangesPanel,
                     onOpenShells: openShellsPanel,
                     onOpenSubagents: openSubagentsPanel,
+                    onOpenArtifacts: openArtifactsPanel,
+                    artifactCount: artifacts.length,
                     onOpenMainExecutionLog: openMainExecutionLog,
                   }}
                 />
@@ -1779,6 +1804,13 @@ export function AppShell() {
                   onShowHiddenChange={setFilesPanelShowHidden}
                   sort={filesPanelSort}
                   onSortChange={handleFilesSortChange}
+                />
+              )}
+              {conversationId && (
+                <ArtifactsPanelDrawer
+                  open={artifactsPanelOpen}
+                  onClose={() => setArtifactsPanelOpen(false)}
+                  conversationId={conversationId}
                 />
               )}
               {/* Mobile-only full-screen drawers for the rail tabs that have no

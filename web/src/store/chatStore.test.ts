@@ -48,6 +48,7 @@ import type {
 } from "@/lib/events";
 import type { TerminalInfo } from "@/hooks/useTerminals";
 import { terminalsQueryKey } from "@/hooks/useTerminals";
+import { artifactsQueryKey, type SessionArtifact } from "@/lib/artifacts";
 import { type ChildSessionInfo, childSessionsQueryKey } from "@/hooks/useChildSessions";
 import {
   consumePendingInitialPrompt,
@@ -5407,6 +5408,92 @@ describe("chatStore — handleSessionEvent (resource events)", () => {
       });
       const cached = client.getQueryData<TerminalInfo[]>(terminalsQueryKey("conv_abc"));
       expect(cached).toEqual([]);
+    });
+  });
+
+  describe("session.resource.created (session_artifact)", () => {
+    function makeArtifactResource(
+      id: string,
+      overrides: Record<string, unknown> = {},
+    ): Record<string, unknown> {
+      return {
+        id,
+        object: "session.resource",
+        type: "session_artifact",
+        session_id: "conv_abc",
+        name: "Final cut",
+        metadata: {
+          filename: "final_cut.mp4",
+          content_type: "video/mp4",
+          bytes: 2048,
+          created_at: 100,
+          render_category: "video",
+          title: "Final cut",
+          description: null,
+          preview_artifact_id: null,
+          ...overrides,
+        },
+      };
+    }
+
+    it("seeds a cold cache so a publish lands without the panel mounted", () => {
+      handleSessionEvent({
+        type: "session_resource_created",
+        resource: makeArtifactResource("artifact_1") as never,
+      });
+
+      const cached = client.getQueryData<SessionArtifact[]>(artifactsQueryKey("conv_abc"));
+      expect(cached).toEqual([
+        {
+          id: "artifact_1",
+          sessionId: "conv_abc",
+          filename: "final_cut.mp4",
+          title: "Final cut",
+          description: null,
+          contentType: "video/mp4",
+          bytes: 2048,
+          createdAt: 100,
+          renderCategory: "video",
+          previewArtifactId: null,
+        },
+      ]);
+    });
+
+    it("keeps the list newest-first as publishes arrive", () => {
+      handleSessionEvent({
+        type: "session_resource_created",
+        resource: makeArtifactResource("artifact_1", { created_at: 100 }) as never,
+      });
+      handleSessionEvent({
+        type: "session_resource_created",
+        resource: makeArtifactResource("artifact_2", { created_at: 200 }) as never,
+      });
+
+      const cached = client.getQueryData<SessionArtifact[]>(artifactsQueryKey("conv_abc"));
+      expect(cached?.map((a) => a.id)).toEqual(["artifact_2", "artifact_1"]);
+    });
+
+    it("is idempotent for duplicate artifact ids", () => {
+      handleSessionEvent({
+        type: "session_resource_created",
+        resource: makeArtifactResource("artifact_1") as never,
+      });
+      handleSessionEvent({
+        type: "session_resource_created",
+        resource: makeArtifactResource("artifact_1") as never,
+      });
+
+      expect(client.getQueryData<SessionArtifact[]>(artifactsQueryKey("conv_abc"))).toHaveLength(1);
+    });
+
+    it("leaves the artifacts cache alone for non-artifact resources", () => {
+      client.setQueryData<SessionArtifact[]>(artifactsQueryKey("conv_abc"), []);
+      handleSessionEvent({
+        type: "session_resource_created",
+        resource: makeTerminalResource("terminal_bash_s1") as never,
+      });
+
+      expect(client.getQueryData<SessionArtifact[]>(artifactsQueryKey("conv_abc"))).toEqual([]);
     });
   });
 
