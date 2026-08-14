@@ -40,9 +40,7 @@ def test_native_relay_exposes_declared_file_tools() -> None:
 
     schemas = build_native_relay_tool_schemas(spec)
 
-    assert {"upload_file", "list_files", "download_file"} <= {
-        schema["name"] for schema in schemas
-    }
+    assert {"upload_file", "list_files", "download_file"} <= {schema["name"] for schema in schemas}
 
 
 @pytest.mark.asyncio
