@@ -12,7 +12,7 @@ from omnigent.runner.tool_dispatch import (
     dispatch_tool_locally,
     execute_tool,
 )
-from omnigent.spec.types import AgentSpec
+from omnigent.spec.types import AgentSpec, BuiltinToolConfig, ToolsConfig
 
 
 @pytest.mark.parametrize("spec", [AgentSpec(spec_version=1), None])
@@ -23,6 +23,26 @@ def test_native_relay_exposes_session_rename(spec: AgentSpec | None) -> None:
 
     assert rename["parameters"]["required"] == ["title"]
     assert rename["parameters"]["additionalProperties"] is False
+
+
+def test_native_relay_exposes_declared_file_tools() -> None:
+    """Native harnesses receive the file tools explicitly declared by an agent."""
+    spec = AgentSpec(
+        spec_version=1,
+        tools=ToolsConfig(
+            builtins=[
+                BuiltinToolConfig(name="upload_file"),
+                BuiltinToolConfig(name="list_files"),
+                BuiltinToolConfig(name="download_file"),
+            ]
+        ),
+    )
+
+    schemas = build_native_relay_tool_schemas(spec)
+
+    assert {"upload_file", "list_files", "download_file"} <= {
+        schema["name"] for schema in schemas
+    }
 
 
 @pytest.mark.asyncio
