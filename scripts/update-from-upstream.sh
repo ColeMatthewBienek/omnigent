@@ -145,7 +145,10 @@ run_alembic_database_drift_guard() {
 
 run_scheduled_task_tests() {
   banner "Scheduled-task seam tests"
-  if uv run pytest -q -p no:cacheprovider "${SCHEDULED_TASK_TESTS[@]}"; then
+  # `--group test` is required: test deps live in a non-default dependency
+  # group, and plain `uv run pytest` silently falls through to whatever
+  # pytest is on PATH, running the gate outside the project environment.
+  if uv run --group test python -m pytest -q -p no:cacheprovider "${SCHEDULED_TASK_TESTS[@]}"; then
     printf 'PASS: scheduled-task seam tests passed.\n'
   else
     fail "Scheduled-task seam tests failed. Review upstream API or schema changes."
