@@ -179,6 +179,9 @@ def _repl_env(
     """
     env = dict(base_env)
     env["HOME"] = str(home)
+    # Pin the runtime data dir under the isolated HOME: the suite exports
+    # OMNIGENT_DATA_DIR session-wide, and it wins over HOME.
+    env["OMNIGENT_DATA_DIR"] = str(home / ".omnigent")
     env["TERM"] = "xterm-256color"
     env["LINES"] = "40"
     env["COLUMNS"] = "120"

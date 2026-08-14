@@ -70,6 +70,9 @@ def _build_repl_env(mock_llm_server_url: str, tmp_home: Path) -> dict[str, str]:
         "OPENAI_API_KEY": "mock-key",
         "OPENAI_BASE_URL": f"{mock_llm_server_url}/v1",
         "HOME": str(tmp_home),
+        # Pin the runtime data dir under the isolated HOME: the suite exports
+        # OMNIGENT_DATA_DIR session-wide, and it wins over HOME.
+        "OMNIGENT_DATA_DIR": str(config_home),
         "OMNIGENT_CONFIG_HOME": str(config_home),
         "DATABRICKS_CONFIG_FILE": str(real_databrickscfg),
         "OMNIGENT_SKIP_ONBOARD": "1",

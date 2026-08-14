@@ -76,7 +76,7 @@ def _patch_daemon_spawn(
     :param tmp_path: Temp dir for the host pidfile + daemon logs.
     :param captured: Dict the Popen stub records ``args`` into.
     """
-    monkeypatch.setattr(cli, "_HOST_PID_PATH", tmp_path / "host.pid")
+    monkeypatch.setenv("OMNIGENT_DATA_DIR", str(tmp_path))
 
     def _popen(args: list[str], *, env: dict[str, str], **_kwargs: object) -> _Proc:
         proc = _Proc(args, env=env)
@@ -783,7 +783,7 @@ def test_foreground_connect_registers_status_record(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """Foreground ``host`` is visible to status while it runs."""
-    monkeypatch.setattr(cli, "_HOST_PID_PATH", tmp_path / "host.pid")
+    monkeypatch.setenv("OMNIGENT_DATA_DIR", str(tmp_path))
     monkeypatch.setattr(cli, "_load_effective_config", dict)
     monkeypatch.setattr(cli, "_load_or_create_host_id", lambda: "host_abc")
     monkeypatch.setattr(cli, "_ensure_databricks_server_auth", lambda server, **kw: None)
@@ -813,7 +813,7 @@ def test_foreground_connect_refuses_duplicate_live_daemon(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """Foreground ``host`` refuses a second live daemon for one server."""
-    monkeypatch.setattr(cli, "_HOST_PID_PATH", tmp_path / "host.pid")
+    monkeypatch.setenv("OMNIGENT_DATA_DIR", str(tmp_path))
     monkeypatch.setattr(cli, "_load_effective_config", dict)
     monkeypatch.setattr(cli, "_load_or_create_host_id", lambda: "host_abc")
     monkeypatch.setattr(cli, "_pid_alive", lambda pid: pid == 4242)
@@ -862,7 +862,7 @@ def _patch_foreground_host_local(
         new server (``True``) or reused an existing one (``False``). The
         Ctrl-C stop-server prompt only fires when ``True``.
     """
-    monkeypatch.setattr(cli, "_HOST_PID_PATH", tmp_path / "host.pid")
+    monkeypatch.setenv("OMNIGENT_DATA_DIR", str(tmp_path))
     monkeypatch.setattr(cli, "_load_effective_config", dict)
     monkeypatch.setattr(cli, "_load_or_create_host_id", lambda: "host_abc")
     monkeypatch.setattr(
@@ -1041,7 +1041,7 @@ def test_foreground_connect_remote_omits_local_server_prompt(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """Remote-mode ``host`` never probes for or prompts about a local server."""
-    monkeypatch.setattr(cli, "_HOST_PID_PATH", tmp_path / "host.pid")
+    monkeypatch.setenv("OMNIGENT_DATA_DIR", str(tmp_path))
     monkeypatch.setattr(cli, "_load_effective_config", dict)
     monkeypatch.setattr(cli, "_load_or_create_host_id", lambda: "host_abc")
     monkeypatch.setattr(cli, "_ensure_databricks_server_auth", lambda server, **kw: None)
@@ -1065,7 +1065,7 @@ def test_host_status_json_reports_daemon_host_and_sessions(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """``host status --json`` includes daemon, host, runner, and sessions."""
-    monkeypatch.setattr(cli, "_HOST_PID_PATH", tmp_path / "host.pid")
+    monkeypatch.setenv("OMNIGENT_DATA_DIR", str(tmp_path))
     monkeypatch.setattr(cli, "_pid_alive", lambda pid: True)
     _write_daemon_registry_record(
         tmp_path,
@@ -1128,7 +1128,7 @@ def test_host_status_reports_unreachable_daemon_without_traceback(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """``host status`` renders per-daemon connection failures."""
-    monkeypatch.setattr(cli, "_HOST_PID_PATH", tmp_path / "host.pid")
+    monkeypatch.setenv("OMNIGENT_DATA_DIR", str(tmp_path))
     monkeypatch.setattr(cli, "_pid_alive", lambda pid: True)
     _write_daemon_registry_record(
         tmp_path,
@@ -1318,7 +1318,7 @@ def test_host_stop_stops_sessions_before_daemon(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """``connect stop`` posts stop_session before terminating the daemon."""
-    monkeypatch.setattr(cli, "_HOST_PID_PATH", tmp_path / "host.pid")
+    monkeypatch.setenv("OMNIGENT_DATA_DIR", str(tmp_path))
     _write_daemon_registry_record(
         tmp_path,
         pid=4242,
@@ -1383,7 +1383,7 @@ def test_host_stop_daemon_only_skips_session_stop(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """``connect stop --daemon-only`` terminates without HTTP session calls."""
-    monkeypatch.setattr(cli, "_HOST_PID_PATH", tmp_path / "host.pid")
+    monkeypatch.setenv("OMNIGENT_DATA_DIR", str(tmp_path))
     _write_daemon_registry_record(
         tmp_path,
         pid=4242,
@@ -1421,7 +1421,7 @@ def test_host_stop_session_list_timeout_points_at_force(
     pre-check times out on healthy hosts. The failure has to name the
     escape hatch or the daemon looks unstoppable.
     """
-    monkeypatch.setattr(cli, "_HOST_PID_PATH", tmp_path / "host.pid")
+    monkeypatch.setenv("OMNIGENT_DATA_DIR", str(tmp_path))
     _write_daemon_registry_record(
         tmp_path,
         pid=4242,
@@ -1458,7 +1458,7 @@ def test_host_stop_force_terminates_after_session_list_timeout(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """``--force`` stops the daemon when the session pre-check times out."""
-    monkeypatch.setattr(cli, "_HOST_PID_PATH", tmp_path / "host.pid")
+    monkeypatch.setenv("OMNIGENT_DATA_DIR", str(tmp_path))
     _write_daemon_registry_record(
         tmp_path,
         pid=4242,
@@ -1871,7 +1871,7 @@ def _patch_foreground_host(
     :param tmp_path: Temp dir for the host pidfile.
     :returns: Capture list of ``run_host_process`` server URLs.
     """
-    monkeypatch.setattr(cli, "_HOST_PID_PATH", tmp_path / "host.pid")
+    monkeypatch.setenv("OMNIGENT_DATA_DIR", str(tmp_path))
     monkeypatch.setattr(cli, "_load_effective_config", dict)
     monkeypatch.setattr(cli, "_load_or_create_host_id", lambda: "host_abc")
     monkeypatch.setattr(
@@ -2203,7 +2203,7 @@ def test_host_command_defaults_scheme_and_accepts_omnigent_web_url(
     default to https and expand to the API mount, not connect to the raw
     input.
     """
-    monkeypatch.setattr(cli, "_HOST_PID_PATH", tmp_path / "host.pid")
+    monkeypatch.setenv("OMNIGENT_DATA_DIR", str(tmp_path))
     monkeypatch.setattr(cli, "_load_effective_config", dict)
     monkeypatch.setattr(cli, "_load_or_create_host_id", lambda: "host_abc")
     monkeypatch.setattr(cli, "_ensure_databricks_server_auth", lambda server, **kw: None)

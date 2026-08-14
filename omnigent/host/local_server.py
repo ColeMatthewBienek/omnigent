@@ -19,10 +19,12 @@ from __future__ import annotations
 import contextlib
 import logging
 import os
+import signal
 import subprocess
 import sys
 import tempfile
 import time
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -54,6 +56,18 @@ _LOCAL_SERVER_BOOT_CEILING_SECONDS = 120.0
 _DOOMED_CHILD_EXIT_GRACE_S = _LOCAL_SERVER_READY_TIMEOUT_SECONDS
 
 
+_data_dir_guard: Callable[[Path], None] | None = None
+"""Optional callback invoked with every resolved data dir.
+
+``None`` in production. The test suite installs a callback that raises the
+moment a resolution lands on the developer's real ``~/.omnigent``, so a test
+that repoints ``OMNIGENT_DATA_DIR`` mid-run fails at the offending call
+instead of after the damage (see ``tests/conftest.py``). Read through the
+module global on every call so it covers callers that imported
+:func:`_local_data_dir` by name.
+"""
+
+
 def _local_data_dir() -> Path:
     """Return the local runtime data dir (db, artifacts, logs, pidfile).
 
@@ -74,27 +88,54 @@ def _local_data_dir() -> Path:
     :returns: The data directory path (callers create it lazily).
     """
     value = os.environ.get("OMNIGENT_DATA_DIR")
-    if value:
-        return Path(value).expanduser()
-    return Path.home() / ".omnigent"
+    resolved = Path(value).expanduser() if value else Path.home() / ".omnigent"
+    if _data_dir_guard is not None:
+        _data_dir_guard(resolved)
+    return resolved
 
 
-# Pidfile carrying the background local server's PID + port (two lines).
-# Read back by the CLI to discover the daemon-started server's URL.
-_LOCAL_SERVER_PID_PATH = _local_data_dir() / "local_server.pid"
+# Every path below is resolved per call, never at import. Binding them at
+# import freezes whatever ``OMNIGENT_DATA_DIR`` held when the module first
+# loaded, so a later override (a test fixture, a worktree shell) is ignored
+# and the process keeps operating on the real ``~/.omnigent`` — including
+# signalling the pid recorded there.
 
-# Sidecar carrying the config signature (resolved auth source) the
-# running local server was spawned under. Reuse is gated on this so a
-# config change (e.g. flipping OMNIGENT_AUTH_ENABLED) respawns the
-# server instead of silently reusing one in the old auth mode.
-_LOCAL_SERVER_SIG_PATH = _local_data_dir() / "local_server.sig"
 
-# Sidecar carrying the absolute path of the background server's captured
-# stdout/stderr log file (one line). Lets `server --background` / `server status`
-# point at the exact ``logs/server/server-*.log`` even when reusing a
-# server this invocation didn't spawn. Absent for a foreground
-# ``omnigent server`` (its logs stream to the terminal, not a file).
-_LOCAL_SERVER_LOG_REF_PATH = _local_data_dir() / "local_server.logpath"
+def _local_server_pid_path() -> Path:
+    """Return the pidfile carrying the local server's PID + port (two lines).
+
+    Read back by the CLI to discover the daemon-started server's URL.
+
+    :returns: e.g. ``Path("/home/alice/.omnigent/local_server.pid")``.
+    """
+    return _local_data_dir() / "local_server.pid"
+
+
+def _local_server_sig_path() -> Path:
+    """Return the config-signature sidecar path.
+
+    Carries the signature (resolved auth source) the running local server
+    was spawned under. Reuse is gated on this so a config change (e.g.
+    flipping ``OMNIGENT_AUTH_ENABLED``) respawns the server instead of
+    silently reusing one in the old auth mode.
+
+    :returns: e.g. ``Path("/home/alice/.omnigent/local_server.sig")``.
+    """
+    return _local_data_dir() / "local_server.sig"
+
+
+def _local_server_log_ref_path() -> Path:
+    """Return the log-path sidecar for the background server.
+
+    Carries the absolute path of the server's captured stdout/stderr log
+    file (one line), so ``server --background`` / ``server status`` can
+    point at the exact ``logs/server/server-*.log`` even when reusing a
+    server this invocation didn't spawn. Absent for a foreground
+    ``omnigent server`` (its logs stream to the terminal, not a file).
+
+    :returns: e.g. ``Path("/home/alice/.omnigent/local_server.logpath")``.
+    """
+    return _local_data_dir() / "local_server.logpath"
 
 
 def server_config_signature() -> str:
@@ -170,15 +211,126 @@ def _read_local_server_pid_file() -> tuple[int, int] | None:
 
     :returns: ``(pid, port)`` if well-formed, ``None`` otherwise.
     """
-    if not _LOCAL_SERVER_PID_PATH.exists():
+    pid_path = _local_server_pid_path()
+    if not pid_path.exists():
         return None
     try:
-        lines = _LOCAL_SERVER_PID_PATH.read_text().strip().splitlines()
+        lines = pid_path.read_text().strip().splitlines()
         if len(lines) < 2:
             return None
         return int(lines[0]), int(lines[1])
     except (ValueError, OSError):
         return None
+
+
+@dataclass(frozen=True)
+class _ProcessIdentity:
+    """A process pinned to its start time, so a recycled pid never matches.
+
+    :param pid: Process id, e.g. ``93359``.
+    :param create_time: The process's start time as reported by psutil.
+    """
+
+    pid: int
+    create_time: float
+
+
+def _process_identity(pid: int) -> _ProcessIdentity | None:
+    """Return *pid*'s identity, or ``None`` when it cannot be established.
+
+    :param pid: Process id to pin, e.g. ``93359``.
+    :returns: The identity, or ``None`` for a vanished / unreadable process.
+    """
+    try:
+        return _ProcessIdentity(pid=pid, create_time=psutil.Process(pid).create_time())
+    except (psutil.Error, OSError):
+        return None
+
+
+@dataclass(frozen=True)
+class _LocalServerRecord:
+    """The pidfile's contents, classified by how much evidence it carries.
+
+    :param pid: Recorded server pid.
+    :param port: Recorded server port.
+    :param create_time: Start time of the process at the moment it was
+        recorded. ``None`` only for a ``legacy`` record.
+    :param data_dir: The data dir the recorded server serves. ``None`` only
+        for a ``legacy`` record.
+    :param kind: ``"extended"`` for a complete, fully-valid record;
+        ``"legacy"`` for an exactly-valid pre-upgrade two-line record;
+        ``"corrupt"`` for anything else.
+    """
+
+    pid: int
+    port: int
+    create_time: float | None
+    data_dir: Path | None
+    kind: str
+
+
+_CORRUPT_RECORD = _LocalServerRecord(
+    pid=0, port=0, create_time=None, data_dir=None, kind="corrupt"
+)
+
+
+def _read_local_server_full_record() -> _LocalServerRecord | None:
+    """Read and classify the pidfile, including its ownership evidence.
+
+    Strict by design. A record is one of exactly three things:
+
+    * **extended** — four lines, all valid: pid, port, a parseable start
+      time, and an absolute data dir. Carries pinned ownership evidence.
+    * **legacy** — a file whose entire content is two valid lines, written
+      before this file grew its evidence fields. Carries no evidence (see
+      :func:`_verify_server_ownership` for the narrow proof it still allows).
+    * **corrupt** — anything else, including a half-written extended record
+      or an unparseable start time.
+
+    Partial evidence must never be treated as *no* evidence: silently
+    dropping an invalid start time would leave a data dir line that matches
+    ours, and that alone would authorize a kill against an unpinned pid.
+
+    The line structure is read RAW, never stripped. Stripping first lets an
+    extended record whose evidence fields are empty — ``"<pid>\n<port>\n\n"``
+    — collapse into a two-line shape and pass as *legacy*, which is exactly
+    the classification with the weakest proof requirement. Only the single
+    conventional trailing newline is forgiven; any further blank line or
+    trailing junk is corruption.
+
+    :returns: The classified record, ``_CORRUPT_RECORD`` when the file
+        exists but does not parse, or ``None`` when there is no file.
+    """
+    pid_path = _local_server_pid_path()
+    try:
+        text = pid_path.read_text()
+    except OSError:
+        return None
+    lines = text.split("\n")
+    if lines and lines[-1] == "":
+        # The one trailing newline this module's writer emits.
+        lines.pop()
+    if len(lines) not in {2, 4}:
+        return _CORRUPT_RECORD
+    try:
+        pid, port = int(lines[0]), int(lines[1])
+    except ValueError:
+        return _CORRUPT_RECORD
+
+    if len(lines) == 2:
+        return _LocalServerRecord(
+            pid=pid, port=port, create_time=None, data_dir=None, kind="legacy"
+        )
+    try:
+        create_time = float(lines[2])
+    except ValueError:
+        return _CORRUPT_RECORD
+    data_dir = Path(lines[3]) if lines[3] else None
+    if data_dir is None or not data_dir.is_absolute():
+        return _CORRUPT_RECORD
+    return _LocalServerRecord(
+        pid=pid, port=port, create_time=create_time, data_dir=data_dir, kind="extended"
+    )
 
 
 def local_server_url_if_healthy() -> str | None:
@@ -233,19 +385,29 @@ def _write_local_server_record(
         any stale log-ref sidecar is then removed so status never reports a
         log file that doesn't apply to the running server.
     """
-    _LOCAL_SERVER_PID_PATH.parent.mkdir(parents=True, exist_ok=True)
+    _local_server_pid_path().parent.mkdir(parents=True, exist_ok=True)
     # Write each file atomically (temp + os.replace) so a concurrent
     # connect/run reader never observes a half-written record — a torn read
     # would parse as malformed and trigger a needless respawn. Sig first:
     # both replaces are individually atomic, so once the pidfile (what reuse
     # keys on) appears, its sig is already fully in place.
-    _atomic_write(_LOCAL_SERVER_SIG_PATH, f"{sig}\n")
+    _atomic_write(_local_server_sig_path(), f"{sig}\n")
     if log_path is not None:
-        _atomic_write(_LOCAL_SERVER_LOG_REF_PATH, f"{log_path}\n")
+        _atomic_write(_local_server_log_ref_path(), f"{log_path}\n")
     else:
         with contextlib.suppress(OSError):
-            _LOCAL_SERVER_LOG_REF_PATH.unlink()
-    _atomic_write(_LOCAL_SERVER_PID_PATH, f"{pid}\n{port}\n")
+            _local_server_log_ref_path().unlink()
+    # Lines 3 and 4 are the ownership evidence the off-switch verifies before
+    # signalling: the process start time (so a recycled pid can never be
+    # mistaken for this server) and the data dir this server serves. A
+    # foreground `omnigent server` carries neither in its argv, so without
+    # them it would be unverifiable — and therefore unstoppable.
+    identity = _process_identity(pid)
+    create_time = "" if identity is None else repr(identity.create_time)
+    _atomic_write(
+        _local_server_pid_path(),
+        f"{pid}\n{port}\n{create_time}\n{_local_data_dir()}\n",
+    )
 
 
 def _read_local_server_log_path() -> Path | None:
@@ -257,7 +419,7 @@ def _read_local_server_log_path() -> Path | None:
         record, or no server) or unreadable.
     """
     try:
-        text = _LOCAL_SERVER_LOG_REF_PATH.read_text().strip()
+        text = _local_server_log_ref_path().read_text().strip()
     except OSError:
         return None
     return Path(text) if text else None
@@ -298,7 +460,7 @@ def _read_local_server_sig() -> str | None:
         ``None`` if the sidecar is absent (legacy server) or unreadable.
     """
     try:
-        sig = _LOCAL_SERVER_SIG_PATH.read_text().strip()
+        sig = _local_server_sig_path().read_text().strip()
     except OSError:
         return None
     return sig or None
@@ -314,7 +476,131 @@ _STOP_POLL_INTERVAL_S = 0.1
 """Polling interval while waiting for the server process to exit."""
 
 
-def _terminate_pid(pid: int) -> None:
+_PIDFD_AVAILABLE = hasattr(os, "pidfd_open") and hasattr(signal, "pidfd_send_signal")
+"""Whether this platform can pin a signal target to a file descriptor.
+
+Linux 5.3+ / CPython 3.9+. Where it is missing (macOS, Windows) the
+portable recheck-then-``os.kill`` path is used instead.
+"""
+
+
+class _SignalTarget:
+    """A process to signal, pinned as tightly as the platform allows.
+
+    On Linux a pidfd is opened first and the identity verified *after* —
+    once a pidfd refers to a process it keeps referring to that exact
+    process, so a pid recycled later cannot be signalled through it. That
+    closes the last window between the check and the ``kill``.
+
+    Elsewhere the identity is rechecked immediately before each signal and
+    then ``os.kill`` is called. A microscopic window remains between those
+    two statements; it is documented rather than hidden, and every anomaly
+    in the recheck refuses instead of signalling.
+
+    :param pid: The process to signal.
+    :param identity: Identity captured at verification, or ``None`` when the
+        caller owns the process handle and has no recycling race.
+    :param pidfd: An open pidfd pinning the process, or ``None``.
+    """
+
+    def __init__(
+        self, pid: int, identity: _ProcessIdentity | None, pidfd: int | None = None
+    ) -> None:
+        self.pid = pid
+        self._identity = identity
+        self._pidfd = pidfd
+
+    @property
+    def pinned(self) -> bool:
+        """Whether signals go through a recycling-proof file descriptor."""
+        return self._pidfd is not None
+
+    def send(self, sig: int) -> bool:
+        """Send *sig*, refusing if the target is no longer the verified one.
+
+        :param sig: Signal number, e.g. ``signal.SIGTERM``.
+        :returns: ``False`` when the signal was refused because the target
+            is no longer the verified process — the caller should stop
+            rather than keep waiting on a process it will never signal.
+        """
+        if self._pidfd is not None:
+            with contextlib.suppress(ProcessLookupError, OSError):
+                signal.pidfd_send_signal(self._pidfd, sig)
+            return True
+        if not _still_the_verified_process(self._identity):
+            return False
+        with contextlib.suppress(ProcessLookupError, OSError):
+            os.kill(self.pid, sig)
+        return True
+
+    def close(self) -> None:
+        """Release the pidfd, if one is held."""
+        if self._pidfd is not None:
+            with contextlib.suppress(OSError):
+                os.close(self._pidfd)
+            self._pidfd = None
+
+
+def _still_the_verified_process(identity: _ProcessIdentity | None) -> bool:
+    """Return whether *identity* still describes the live process at its pid.
+
+    :param identity: The identity captured at verification, or ``None`` when
+        the caller opted out of identity pinning (it owns the process handle
+        directly).
+    :returns: ``True`` when it is safe to signal.
+    """
+    if identity is None:
+        return True
+    current = _process_identity(identity.pid)
+    if current == identity:
+        return True
+    _logger.warning(
+        "Not signalling pid %d: it is no longer the process that was verified "
+        "(it exited or the pid was recycled)",
+        identity.pid,
+    )
+    return False
+
+
+@contextlib.contextmanager
+def _signal_target(pid: int, identity: _ProcessIdentity | None) -> Iterator[_SignalTarget | None]:
+    """Yield a pinned signal target for *pid*, or ``None`` to refuse.
+
+    Opens a pidfd where the platform supports one and re-verifies the
+    identity through it: if the process behind the fd is not the one that
+    was verified, the fd is dropped and the caller refuses. A pidfd that
+    fails to open for a process we believe is alive is an anomaly, not a
+    licence to fall back to a pid-addressed kill.
+
+    :param pid: The process to signal.
+    :param identity: Identity captured at verification, or ``None`` for a
+        caller that owns the process handle.
+    :returns: The target, or ``None`` when signalling must be refused.
+    """
+    if identity is None or not _PIDFD_AVAILABLE:
+        yield _SignalTarget(pid, identity)
+        return
+    try:
+        pidfd = os.pidfd_open(pid)
+    except (ProcessLookupError, PermissionError, OSError) as exc:
+        _logger.warning(
+            "Not signalling pid %d: could not pin it to a file descriptor (%s)", pid, exc
+        )
+        yield None
+        return
+    target = _SignalTarget(pid, identity, pidfd)
+    try:
+        # Verify AFTER pinning: from here the fd, not the pid, names the
+        # process, so nothing that happens to the pid can redirect a signal.
+        if not _still_the_verified_process(identity):
+            yield None
+            return
+        yield target
+    finally:
+        target.close()
+
+
+def _terminate_pid(pid: int, identity: _ProcessIdentity | None = None) -> None:
     """SIGTERM a pid, wait up to the grace period, then SIGKILL if needed.
 
     Shared by :func:`stop_local_omnigent_server` (the pidfile-tracked server) and
@@ -322,30 +608,324 @@ def _terminate_pid(pid: int) -> None:
     Waits for the process to exit so the listening socket is released and the
     port becomes immediately re-bindable. Best-effort: a dead pid is a no-op.
 
+    Signals go through a :class:`_SignalTarget`, which pins the process to a
+    pidfd where the platform allows so neither the SIGTERM nor the later
+    SIGKILL — sent after a grace period that is the widest window for a pid
+    to be recycled — can land on a process that took the pid over.
+
     :param pid: Process id to terminate, e.g. ``93359``.
+    :param identity: Identity captured when ownership was verified. ``None``
+        for callers holding the process handle themselves (a spawn reaping
+        its own child), which have no recycling race.
     :returns: None.
     """
-    import signal
-
     if not _pid_alive(pid):
         return
-    with contextlib.suppress(ProcessLookupError, OSError):
-        os.kill(pid, signal.SIGTERM)
-    deadline = time.monotonic() + _STOP_GRACE_S
-    while time.monotonic() < deadline:
-        if not _pid_alive(pid):
+    with _signal_target(pid, identity) as target:
+        if target is None:
             return
-        time.sleep(_STOP_POLL_INTERVAL_S)
-    # Grace period expired — force-kill so the port is freed. Windows has no
-    # SIGKILL; os.kill with SIGTERM there maps to TerminateProcess (forceful).
-    with contextlib.suppress(ProcessLookupError, OSError):
-        os.kill(pid, getattr(signal, "SIGKILL", signal.SIGTERM))
-    # Brief wait for the kernel to reap after SIGKILL.
-    deadline = time.monotonic() + 2.0
-    while time.monotonic() < deadline:
-        if not _pid_alive(pid):
+        if not target.send(signal.SIGTERM):
             return
-        time.sleep(_STOP_POLL_INTERVAL_S)
+        deadline = time.monotonic() + _STOP_GRACE_S
+        while time.monotonic() < deadline:
+            if not _pid_alive(pid):
+                return
+            time.sleep(_STOP_POLL_INTERVAL_S)
+        # Grace period expired — force-kill so the port is freed. Windows has
+        # no SIGKILL; os.kill with SIGTERM there maps to TerminateProcess
+        # (forceful).
+        if not target.send(getattr(signal, "SIGKILL", signal.SIGTERM)):
+            return
+        # Brief wait for the kernel to reap after SIGKILL.
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            if not _pid_alive(pid):
+                return
+            time.sleep(_STOP_POLL_INTERVAL_S)
+
+
+def _cmdline_option(cmdline: list[str], flag: str) -> str | None:
+    """Return the value of ``--flag value`` / ``--flag=value`` in *cmdline*.
+
+    :param cmdline: A process argv, e.g. ``["omnigent", "server", "--port", "6767"]``.
+    :param flag: The long option to look for, e.g. ``"--artifact-location"``.
+    :returns: The option's value, or ``None`` when the flag is absent.
+    """
+    prefix = f"{flag}="
+    for index, arg in enumerate(cmdline):
+        if arg == flag:
+            return cmdline[index + 1] if index + 1 < len(cmdline) else None
+        if arg.startswith(prefix):
+            return arg[len(prefix) :]
+    return None
+
+
+def _process_cmdline(pid: int) -> list[str] | None:
+    """Return *pid*'s argv, or ``None`` when it cannot be read.
+
+    :param pid: Process id to inspect, e.g. ``93359``.
+    :returns: The argv list, or ``None`` for a vanished process, another
+        user's process, or a platform that hides argv.
+    """
+    try:
+        return list(psutil.Process(pid).cmdline())
+    except (psutil.Error, OSError):
+        return None
+
+
+def _omnigent_subcommand(cmdline: list[str]) -> str | None:
+    """Return the subcommand of an Omnigent invocation, else ``None``.
+
+    Both the entrypoint and the subcommand are matched by *position*:
+    argv[0]'s basename (or ``-m`` immediately followed by ``omnigent.cli``)
+    identifies the entrypoint, and the subcommand is the first non-option
+    token after it. Scanning for the word anywhere in argv would accept
+    ``omnigent run --flag server``, and scanning for "omnigent" anywhere
+    would accept any interpreter run from a checkout of this repo.
+
+    Group-level options that take a separate value (``omnigent --config X
+    server``) make the token after them look like the subcommand, so such
+    an invocation is not recognized. That is the fail-closed direction: an
+    unrecognized server is left running, never killed by mistake.
+
+    :param cmdline: A process argv.
+    :returns: The subcommand token, e.g. ``"server"``, or ``None`` when the
+        argv is not a positionally-recognizable Omnigent invocation.
+    """
+    if not cmdline:
+        return None
+    rest: list[str] | None = None
+    if Path(cmdline[0]).name in {"omnigent", "omni"}:
+        rest = cmdline[1:]
+    else:
+        for index, arg in enumerate(cmdline):
+            if arg == "-m" and index + 1 < len(cmdline) and cmdline[index + 1] == "omnigent.cli":
+                rest = cmdline[index + 2 :]
+                break
+    if rest is None:
+        return None
+    return next((token for token in rest if not token.startswith("-")), None)
+
+
+def _is_omnigent_server_cmdline(cmdline: list[str]) -> bool:
+    """Return whether *cmdline* is an ``omnigent server`` invocation.
+
+    :param cmdline: A process argv.
+    :returns: ``True`` only when ``server`` is the subcommand.
+    """
+    return _omnigent_subcommand(cmdline) == "server"
+
+
+def _serves_this_data_dir(candidate: str | Path | None, *, source: str, pid: int) -> bool:
+    """Return whether *candidate* is proof the pid serves THIS data dir.
+
+    :param candidate: A data dir claimed by the process (from its recorded
+        evidence or its argv), or ``None`` when there is no claim.
+    :param source: Where the claim came from, for the refusal log.
+    :param pid: The pid being checked, for the refusal log.
+    :returns: ``True`` only when *candidate* is absolute and canonically
+        equal to this process's data dir.
+    """
+    if candidate is None:
+        return False
+    claimed = Path(candidate).expanduser()
+    if not claimed.is_absolute():
+        # A relative path resolves against whatever cwd the spawn ran in,
+        # which this process need not share — it proves nothing.
+        _logger.warning(
+            "Refusing to stop pid %d: its %s data dir %r is relative, so ownership "
+            "cannot be established",
+            pid,
+            source,
+            str(candidate),
+        )
+        return False
+    if claimed.resolve() == _local_data_dir().expanduser().resolve():
+        return True
+    _logger.warning(
+        "Refusing to stop pid %d: its %s data dir %s is not this process's %s",
+        pid,
+        source,
+        claimed,
+        _local_data_dir(),
+    )
+    return False
+
+
+def _started_before_the_record(identity: _ProcessIdentity, *, pid: int) -> bool:
+    """Return whether *identity* started before the pidfile was written.
+
+    The lineage check for the legacy route, which has no recorded start
+    time to compare against. A genuine server was already running when it
+    claimed the record, so its start time precedes the file's mtime; a pid
+    the OS recycled *after* the record was written cannot, however
+    convincing its argv looks.
+
+    Deliberately strict about the unknown: an unreadable mtime refuses.
+
+    :param identity: The candidate process's pinned identity.
+    :param pid: The pid, for the refusal log.
+    :returns: ``True`` when the process predates the record.
+    """
+    try:
+        record_mtime = _local_server_pid_path().stat().st_mtime
+    except OSError as exc:
+        _logger.warning(
+            "Refusing to stop pid %d: its legacy record's timestamp could not be read (%s)",
+            pid,
+            exc,
+        )
+        return False
+    if identity.create_time < record_mtime:
+        return True
+    _logger.warning(
+        "Refusing to stop pid %d: it started at %r, after its legacy record was written "
+        "at %r — the pid was recycled since",
+        pid,
+        identity.create_time,
+        record_mtime,
+    )
+    return False
+
+
+def _verify_server_ownership(
+    pid: int, *, recorded: _LocalServerRecord | None
+) -> _ProcessIdentity | None:
+    """Return *pid*'s identity only if it is PROVABLY this data dir's server.
+
+    Fails closed. Every path that cannot positively establish ownership —
+    an unreadable argv, an argv that is not an Omnigent server, a corrupt
+    record, a missing or relative ``--artifact-location``, a start time that
+    disagrees with the record — refuses and says why. Killing the wrong
+    process (a developer's live daemon, an unrelated program that inherited
+    a recycled pid) is far worse than leaving a stale server up, which the
+    user can always stop by hand.
+
+    Ownership is proven by exactly one of three routes:
+
+    * **extended record** — the record names this data dir AND pins the
+      process start time. The only proof a foreground ``omnigent server``
+      can offer going forward, since its argv carries no
+      ``--artifact-location``.
+    * **argv** — a daemon-spawned server whose ``--artifact-location`` the
+      spawn stamped with an absolute path under this data dir.
+    * **legacy record** — a pre-upgrade two-line record, for which the
+      pidfile's own location in *this* data dir is the only available
+      evidence. Accepted only when the argv is a positionally-recognized
+      ``omnigent server`` that names no data dir of its own AND started
+      before its record was written — i.e. exactly the foreground server
+      that would otherwise have become unstoppable by this change.
+      Deprecated: remove this route in 0.11.0, by which point every live
+      record has been rewritten with full evidence.
+
+    The config signature is deliberately NOT part of this: the drift heal in
+    :func:`ensure_local_omnigent_server` stops a server precisely *because*
+    its signature no longer matches this invocation's.
+
+    :param pid: The pid under consideration, e.g. ``93359``.
+    :param recorded: The pidfile record naming it, or ``None`` when the pid
+        came from a source that has no record (the untracked-port sweep).
+    :returns: The verified :class:`_ProcessIdentity` to signal, or ``None``
+        to refuse.
+    """
+    if recorded is not None and recorded.kind == "corrupt":
+        _logger.warning(
+            "Refusing to stop pid %d: its record is corrupt, so ownership cannot be established",
+            pid,
+        )
+        return None
+
+    identity = _process_identity(pid)
+    if identity is None:
+        _logger.warning(
+            "Refusing to stop pid %d: its identity could not be read, so ownership "
+            "cannot be established",
+            pid,
+        )
+        return None
+
+    if recorded is not None and recorded.kind == "extended":
+        # The pid was recycled since the record was written: whatever holds
+        # it now is a different process than the one we recorded.
+        if recorded.create_time != identity.create_time:
+            _logger.warning(
+                "Refusing to stop pid %d: it started at %r but the record names a "
+                "process started at %r — the pid was recycled",
+                pid,
+                identity.create_time,
+                recorded.create_time,
+            )
+            return None
+        if _serves_this_data_dir(recorded.data_dir, source="recorded", pid=pid):
+            return identity
+        return None
+
+    cmdline = _process_cmdline(pid)
+    if cmdline is None:
+        _logger.warning(
+            "Refusing to stop pid %d: its command line could not be read, so "
+            "ownership cannot be established",
+            pid,
+        )
+        return None
+    if not _is_omnigent_server_cmdline(cmdline):
+        _logger.warning(
+            "Refusing to stop pid %d: it is not an Omnigent server (%s)",
+            pid,
+            " ".join(cmdline[:3]),
+        )
+        return None
+
+    artifacts = _cmdline_option(cmdline, "--artifact-location")
+    if artifacts is not None:
+        if _serves_this_data_dir(Path(artifacts).parent, source="command-line", pid=pid):
+            return identity
+        return None
+
+    if recorded is not None and recorded.kind == "legacy":
+        # Legacy migration route (remove in 0.11.0). The argv names no data
+        # dir, so the evidence is the pidfile itself: it lives in the data
+        # dir this process operates on, and only a server that claimed it
+        # could be named there. That alone says nothing about *when*, so
+        # the record's mtime supplies the missing lineage — a server writes
+        # its record after it starts, and a pid recycled after the record
+        # was written cannot satisfy that ordering.
+        if not _started_before_the_record(identity, pid=pid):
+            return None
+        _logger.info(
+            "Stopping pid %d on legacy-record evidence: its pre-upgrade record in %s "
+            "names it, it predates that record, and its command line claims no other "
+            "data dir",
+            pid,
+            _local_data_dir(),
+        )
+        return identity
+
+    _logger.warning(
+        "Refusing to stop pid %d: neither its record nor its command line names "
+        "the data dir it serves, so ownership cannot be established",
+        pid,
+    )
+    return None
+
+
+def _quarantine_corrupt_record() -> None:
+    """Move an unreadable pidfile aside, preserving it for diagnosis.
+
+    :returns: None.
+    """
+    pid_path = _local_server_pid_path()
+    quarantined = pid_path.with_suffix(pid_path.suffix + ".corrupt")
+    try:
+        os.replace(pid_path, quarantined)
+    except OSError as exc:
+        _logger.warning("Could not set aside the corrupt local-server record: %s", exc)
+        return
+    _logger.warning(
+        "Local-server record was unreadable and has been kept at %s for diagnosis; "
+        "no process was signalled",
+        quarantined,
+    )
 
 
 def stop_local_omnigent_server() -> None:
@@ -364,18 +944,36 @@ def stop_local_omnigent_server() -> None:
     NOT visible here — :func:`stop_untracked_local_server` covers that, and
     the off-switch (``omnigent stop`` / ``server stop``) calls both.
 
+    Refuses, and leaves the record intact, unless ownership is positively
+    proven (:func:`_verify_server_ownership`) — a foreign daemon, a recycled
+    pid, or simply a pid whose ownership cannot be established is left alone.
+    An unreadable record is set aside as ``.corrupt`` rather than deleted, so
+    a server it may still name does not vanish without a trace.
+
     :returns: None.
     """
-    existing = _read_local_server_pid_file()
-    if existing is not None:
-        pid, _port = existing
-        _terminate_pid(pid)
+    recorded = _read_local_server_full_record()
+    if recorded is not None and recorded.kind == "corrupt":
+        # A record we cannot read may still name a running server, so
+        # deleting it would lose the only trace of it. Set it aside under a
+        # .corrupt suffix: the evidence survives for diagnosis, and the next
+        # invocation starts from a clean slate rather than re-reading junk.
+        _quarantine_corrupt_record()
+        return
+    if recorded is not None:
+        identity = _verify_server_ownership(recorded.pid, recorded=recorded)
+        if identity is None:
+            # Not ours to stop, and not ours to forget either: clearing the
+            # record would hand the next invocation a blank slate for a
+            # server that is still running.
+            return
+        _terminate_pid(recorded.pid, identity)
     with contextlib.suppress(OSError):
-        _LOCAL_SERVER_PID_PATH.unlink()
+        _local_server_pid_path().unlink()
     with contextlib.suppress(OSError):
-        _LOCAL_SERVER_SIG_PATH.unlink()
+        _local_server_sig_path().unlink()
     with contextlib.suppress(OSError):
-        _LOCAL_SERVER_LOG_REF_PATH.unlink()
+        _local_server_log_ref_path().unlink()
 
 
 @dataclass(frozen=True)
@@ -797,8 +1395,10 @@ def stop_untracked_local_server(port: int = _DEFAULT_LOCAL_PORT) -> int | None:
     ``/health`` on the canonical loopback *port*, find its PID and terminate
     it. Call it AFTER :func:`stop_local_omnigent_server` so a normally-tracked
     server is already gone and ``/health`` no longer answers (this is a
-    no-op). Best-effort: returns ``None`` when nothing untracked is found or
-    ``lsof`` is unavailable.
+    no-op). Best-effort: returns ``None`` when nothing untracked is found,
+    ``lsof`` is unavailable, or the listener is not provably a server for
+    THIS data dir (:func:`_verify_server_ownership`). An orphan carrying no
+    ownership evidence is left running rather than risked.
 
     :param port: Canonical loopback port to sweep, e.g. ``6767``.
     :returns: The PID stopped, or ``None`` if there was nothing to stop.
@@ -809,7 +1409,15 @@ def stop_untracked_local_server(port: int = _DEFAULT_LOCAL_PORT) -> int | None:
     pid = _pid_listening_on_port(port)
     if pid is None or not _pid_alive(pid):
         return None
-    _terminate_pid(pid)
+    # Answering /health on the canonical port is not ownership: the server
+    # there may belong to another data dir (a second checkout, the
+    # developer's real ~/.omnigent). There is no record to appeal to here —
+    # that is what "untracked" means — so ownership must be proven by the
+    # target's own argv, and the sweep refuses whenever it cannot be.
+    identity = _verify_server_ownership(pid, recorded=None)
+    if identity is None:
+        return None
+    _terminate_pid(pid, identity)
     return pid
 
 
@@ -845,11 +1453,11 @@ def clear_local_server_record() -> None:
     existing = _read_local_server_pid_file()
     if existing is not None and existing[0] == os.getpid():
         with contextlib.suppress(OSError):
-            _LOCAL_SERVER_PID_PATH.unlink()
+            _local_server_pid_path().unlink()
         with contextlib.suppress(OSError):
-            _LOCAL_SERVER_SIG_PATH.unlink()
+            _local_server_sig_path().unlink()
         with contextlib.suppress(OSError):
-            _LOCAL_SERVER_LOG_REF_PATH.unlink()
+            _local_server_log_ref_path().unlink()
 
 
 def _wait_for_local_omnigent_server(
@@ -938,9 +1546,9 @@ def _raise_local_server_failed(base_url: str, log_path: Path) -> None:
     # A failed spawn leaves a misleading pidfile; clear it (and the sig
     # sidecar) so the next invocation does not try to reuse a dead entry.
     with contextlib.suppress(OSError):
-        _LOCAL_SERVER_PID_PATH.unlink()
+        _local_server_pid_path().unlink()
     with contextlib.suppress(OSError):
-        _LOCAL_SERVER_SIG_PATH.unlink()
+        _local_server_sig_path().unlink()
     raise click.ClickException(
         f"Background local server failed to start ({base_url}).\n"
         f"  Server log: {log_path}\n"

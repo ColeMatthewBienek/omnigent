@@ -110,6 +110,9 @@ def _spawn_host_daemon(
     env = {
         **os.environ,
         "HOME": str(tmp_path),
+        # Pin the runtime data dir under the isolated HOME: the suite exports
+        # OMNIGENT_DATA_DIR session-wide, and it wins over HOME.
+        "OMNIGENT_DATA_DIR": str(omni_dir),
         "OPENAI_BASE_URL": f"{mock_llm_server_url}/v1",
         "OPENAI_API_KEY": "mock-key",
         PROCESS_LOG_FILE_ENV_VAR: str(daemon_log),
@@ -894,6 +897,9 @@ def _spawn_host_daemon_for_mock_claude(
     env = {
         **os.environ,
         "HOME": str(tmp_path),
+        # Pin the runtime data dir under the isolated HOME: the suite exports
+        # OMNIGENT_DATA_DIR session-wide, and it wins over HOME.
+        "OMNIGENT_DATA_DIR": str(omni_dir),
         # ANTHROPIC_BASE_URL is in HARNESS_CREDENTIAL_ENV_VARS so it flows
         # daemon→runner. The Anthropic SDK appends /v1/messages; omit /v1.
         "ANTHROPIC_BASE_URL": mock_llm_server_url,
