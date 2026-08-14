@@ -461,6 +461,9 @@ _NATIVE_RELAY_BUILTIN_TOOLS = (
     | _POLICY_TOOLS
     | _SCHEDULED_TASK_TOOLS
     | _TERMINAL_TOOLS
+    # File tools are declared opt-in builtins. Native harnesses need them on
+    # the relay surface because they do not consume the normal tools list.
+    | _FILE_TOOLS
     # ``browser_*`` must ride the native relay: the Omnigent desktop app
     # runs native (claude/codex/pi) sessions, which ignore ``request.tools``
     # and see ONLY this relay surface — without this union member the
@@ -480,7 +483,8 @@ def build_native_relay_tool_schemas(spec: AgentSpec | None) -> list[_JsonObject]
     Returns the same tool set the claude-native / codex-native relay advertises
     and that pi-native registers via ``pi.registerTool``: the spec-gated builtin
     surface (``_NATIVE_RELAY_BUILTIN_TOOLS`` — comment, session read/write,
-    agent-discovery, policy, and terminal families) plus the ``sys_os_*`` tools,
+    agent-discovery, policy, terminal, and declared file-tool families) plus
+    the ``sys_os_*`` tools,
     relayed unconditionally so they override any harness-static versions and get
     centralized policy enforcement on the Omnigent server.
 
