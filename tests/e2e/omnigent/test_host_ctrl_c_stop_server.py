@@ -69,10 +69,10 @@ def _connect_env(base_env: Mapping[str, str], home: Path) -> dict[str, str]:
     """
     Build the subprocess environment for a ``host`` PTY run.
 
-    Isolates ``HOME`` so the local-server pidfile, host registry, and sqlite
-    db land under the per-test directory (``ensure_local_omnigent_server`` keys its
-    data dir off ``~/.omnigent`` when ``OMNIGENT_DATA_DIR`` is unset),
-    keeping the test from touching the developer's real local server.
+    Isolates ``HOME`` and pins ``OMNIGENT_DATA_DIR`` beneath it so the
+    local-server pidfile, host registry, and sqlite db land under the
+    per-test directory, keeping the test from touching the developer's real
+    local server.
 
     :param base_env: Fixture-provided credentials environment, e.g.
         ``mock_credentials_env``.
@@ -81,6 +81,9 @@ def _connect_env(base_env: Mapping[str, str], home: Path) -> dict[str, str]:
     """
     env = dict(base_env)
     env["HOME"] = str(home)
+    # Pin the runtime data dir under the isolated HOME: the suite exports
+    # OMNIGENT_DATA_DIR session-wide, and it wins over HOME.
+    env["OMNIGENT_DATA_DIR"] = str(home / ".omnigent")
     env["TERM"] = "xterm-256color"
     env["LINES"] = "40"
     env["COLUMNS"] = "120"

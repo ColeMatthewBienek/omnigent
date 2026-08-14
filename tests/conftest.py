@@ -7,6 +7,7 @@ import sys
 import time
 from collections.abc import Generator
 from pathlib import Path
+from types import ModuleType
 
 import pytest
 
@@ -59,6 +60,13 @@ from omnigent.runtime.filesystem_registry import GitFilesystemRegistry
 from tests import _model_pools
 
 pytest_plugins = ["tests._token_usage"]
+
+# The developer's real runtime data dir, captured at import — before any
+# fixture can patch ``HOME`` or ``OMNIGENT_DATA_DIR``. A live ``omnigent``
+# daemon records its pids here; a test that resolves to this directory can
+# read those pids and SIGTERM the user's own server, so
+# :func:`_guard_real_omnigent_data_dir` fails any test that does.
+_REAL_USER_DATA_DIR = (Path(os.path.expanduser("~")) / ".omnigent").resolve()
 
 
 def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
@@ -270,6 +278,174 @@ def pytest_addoption(parser):
             "configured with the credentials/profile the test needs."
         ),
     )
+
+
+def _installed_data_dir_guard(resolved: Path) -> None:
+    """The hook installed into :func:`_local_data_dir` for the whole session.
+
+    :param resolved: The data dir the resolver is about to hand out.
+    :returns: None.
+    :raises AssertionError: If it is the developer's real data dir.
+    """
+    _reject_real_data_dir(resolved, "a test")
+
+
+class _SealedGuardModule(ModuleType):
+    """Module type that refuses to let its data-dir guard be removed.
+
+    Installed over ``omnigent.host.local_server`` for the test session.
+    Every other attribute stays freely patchable — tests monkeypatch
+    ``_pid_alive``, ``_process_cmdline`` and friends constantly — but the
+    guard itself is not something an individual test gets to switch off.
+    """
+
+    def __setattr__(self, name: str, value: object) -> None:
+        if name == "_data_dir_guard" and value is not _installed_data_dir_guard:
+            raise AssertionError(
+                "Refusing to disarm the runtime data-dir guard. A test that needs "
+                "unguarded resolution must run it in a subprocess with its own "
+                "environment (see tests/test_data_dir_isolation.py), not switch the "
+                "guard off for the rest of the session."
+            )
+        super().__setattr__(name, value)
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _isolate_omnigent_data_dir(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> Generator[None, None, None]:
+    """
+    Point the whole suite's runtime data dir at a throwaway directory.
+
+    ``~/.omnigent`` is live state on a developer machine: it holds the
+    ``host.pid`` / ``local_server.pid`` records of a *running* Omnigent
+    daemon and server. Test helpers reach ``ensure_local_omnigent_server``,
+    whose config-drift heal stops whatever server those records name — so a
+    suite run against the real data dir SIGTERMs the developer's server.
+    ``OMNIGENT_DATA_DIR`` redirects every one of those paths (they are all
+    resolved per call, never frozen at import), and the session scope means
+    the redirect is in place before the first test collects a fixture.
+
+    Session-scoped, so it uses its own :class:`pytest.MonkeyPatch` rather
+    than the function-scoped ``monkeypatch`` fixture. Tests that need a
+    different data dir still override the var themselves; the guard below
+    only objects to the *real* one.
+
+    :param tmp_path_factory: Pytest's session-scoped temp factory.
+    :returns: None.
+    """
+    from omnigent.host import local_server
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setenv("OMNIGENT_DATA_DIR", str(tmp_path_factory.mktemp("omnigent-data")))
+    # Check every resolution, not just the ones at test boundaries: a test
+    # that repoints OMNIGENT_DATA_DIR at the real dir mid-body and restores it
+    # before teardown would otherwise do its damage unseen. The hook fires
+    # inside _local_data_dir itself, so it covers callers that imported the
+    # function by name too.
+    local_server._data_dir_guard = _installed_data_dir_guard
+    original_class = type(local_server)
+    # Seal the hook. Without this, "monkeypatch.setattr(local_server,
+    # '_data_dir_guard', None)" is a one-line escape from the very check
+    # that makes the suite safe — do the damage, restore, pass the boundary
+    # check. Sealing turns that bypass into an immediate error at the
+    # assignment. Tests that genuinely need unguarded resolution run it in a
+    # subprocess (tests/test_data_dir_isolation.py) rather than disarming
+    # the guard for everyone.
+    local_server.__class__ = _SealedGuardModule
+    try:
+        yield
+    finally:
+        local_server.__class__ = original_class
+        local_server._data_dir_guard = None
+        monkeypatch.undo()
+
+
+def _reject_real_data_dir(candidate: Path, context: str) -> None:
+    """Raise if *candidate* is (or sits inside) the developer's real data dir.
+
+    Compares canonical forms — ``Path.resolve()`` on both sides — so
+    ``~/.omnigent/../.omnigent``, a trailing ``.``, or a symlink pointing at
+    the real directory cannot slip past a string comparison. Containment is
+    rejected too: writing to ``~/.omnigent/anything`` is the same hazard as
+    writing to the directory itself.
+
+    :param candidate: The resolved runtime data dir to check.
+    :param context: What produced it, for the failure message.
+    :returns: None.
+    :raises AssertionError: If *candidate* is the real data dir or is under it.
+    """
+    resolved = candidate.expanduser().resolve()
+    if resolved != _REAL_USER_DATA_DIR and not resolved.is_relative_to(_REAL_USER_DATA_DIR):
+        return
+    raise AssertionError(
+        f"{context} resolved the runtime data dir to {resolved}, which is the "
+        f"developer's real {_REAL_USER_DATA_DIR}. Tests must never read or write "
+        f"it: it holds a live daemon's pid records, and any helper that reaches "
+        f"ensure_local_omnigent_server() can stop the server they name. Set "
+        f"OMNIGENT_DATA_DIR to a tmp dir instead."
+    )
+
+
+def assert_isolated_data_dir(nodeid: str, when: str) -> None:
+    """Assert the resolved runtime data dir is not the developer's real one.
+
+    :param nodeid: The test being checked, e.g. ``"tests/test_x.py::test_y"``.
+    :param when: Where in the test's lifecycle the check runs, e.g.
+        ``"before"``.
+    :returns: None.
+    :raises AssertionError: If the data dir resolves to
+        :data:`_REAL_USER_DATA_DIR`.
+    """
+    from omnigent.host.local_server import _local_data_dir
+
+    _reject_real_data_dir(_local_data_dir(), f"{nodeid} ({when} the test)")
+
+
+def _assert_guard_installed(nodeid: str, when: str) -> None:
+    """Assert the in-resolution guard is still armed.
+
+    Belt to the seal's braces: if some path ever manages to replace the
+    hook, the next test boundary says so instead of the suite quietly
+    running unguarded.
+
+    :param nodeid: The test being checked.
+    :param when: Where in the lifecycle the check runs.
+    :returns: None.
+    :raises AssertionError: If the hook is missing or not ours.
+    """
+    from omnigent.host import local_server
+
+    assert local_server._data_dir_guard is _installed_data_dir_guard, (
+        f"the runtime data-dir guard was not installed {when} {nodeid}; the suite "
+        f"would run without mid-test isolation enforcement"
+    )
+
+
+@pytest.fixture(autouse=True)
+def _guard_real_omnigent_data_dir(request: pytest.FixtureRequest) -> Generator[None, None, None]:
+    """
+    Fail any test whose resolved data dir is the developer's real one.
+
+    :func:`_isolate_omnigent_data_dir` sets the redirect and installs the
+    in-resolution hook that catches mid-test drift; this is the boundary
+    check on top of it, so a fixture that clears ``OMNIGENT_DATA_DIR``
+    without ever resolving it still surfaces as a failing test rather than
+    leaking into the next one.
+
+    Autouse fixtures run before explicitly-requested ones, so this checks
+    *outside* any ``monkeypatch`` a test applies: a test that inspects
+    home-based resolution inside its own body (and restores it) is fine.
+
+    :param request: Pytest request, used to name the offending test.
+    :returns: None.
+    :raises AssertionError: If the resolved data dir is the real one.
+    """
+    _assert_guard_installed(request.node.nodeid, "before")
+    assert_isolated_data_dir(request.node.nodeid, "before")
+    yield
+    _assert_guard_installed(request.node.nodeid, "after")
+    assert_isolated_data_dir(request.node.nodeid, "after")
 
 
 @pytest.fixture(autouse=True)

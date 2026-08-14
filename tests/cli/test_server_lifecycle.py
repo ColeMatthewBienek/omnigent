@@ -389,7 +389,7 @@ def test_stop_clears_stale_legacy_host_pid(
     host_pid = tmp_path / "host.pid"
     # 2147483647 is not a real PID, so _pid_alive() is False → delete-only path.
     host_pid.write_text("2147483647\nhttps://stale.example\n")
-    monkeypatch.setattr("omnigent.cli._HOST_PID_PATH", host_pid)
+    monkeypatch.setenv("OMNIGENT_DATA_DIR", str(tmp_path))
     monkeypatch.setattr("omnigent.cli.local_server_url_if_healthy", lambda: None)
     monkeypatch.setattr("omnigent.cli.stop_local_omnigent_server", Mock())
     monkeypatch.setattr("omnigent.cli.stop_untracked_local_server", lambda: None)
