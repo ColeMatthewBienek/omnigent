@@ -43,6 +43,16 @@ def test_native_relay_exposes_declared_file_tools() -> None:
     assert {"upload_file", "list_files", "download_file"} <= {schema["name"] for schema in schemas}
 
 
+@pytest.mark.parametrize("spec", [AgentSpec(spec_version=1), None])
+def test_native_relay_omits_undeclared_file_tools(spec: AgentSpec | None) -> None:
+    """File tools stay opt-in: an agent that never declares them sees none."""
+    schemas = build_native_relay_tool_schemas(spec)
+
+    assert not {"upload_file", "list_files", "download_file"} & {
+        schema["name"] for schema in schemas
+    }
+
+
 @pytest.mark.asyncio
 async def test_session_rename_dispatches_to_current_session() -> None:
     requests: list[httpx.Request] = []
