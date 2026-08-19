@@ -22,7 +22,7 @@ from omnigent.db.utils import (
     get_or_create_engine,
 )
 
-_PREVIOUS_HEAD = "d5e9f1a2b3c4"
+_PREVIOUS_HEAD = "za2b3c4d5e6f"
 
 
 @pytest.fixture
