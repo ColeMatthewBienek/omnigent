@@ -80,10 +80,8 @@ def _extract_models(text: str) -> list[str]:
 
 def _is_example_agent_spec(path: Path) -> bool:
     """Return whether *path* is an intentionally pinned example agent spec."""
-    return (
-        path.suffix in {".yaml", ".yml"}
-        and path.name in {"config.yaml", "config.yml"}
-        and path.parts[:1] == (EXAMPLE_AGENT_SPEC_ROOT.name,)
+    return path.name in {"config.yaml", "config.yml"} and path.parts[:1] == (
+        EXAMPLE_AGENT_SPEC_ROOT.name,
     )
 
 
