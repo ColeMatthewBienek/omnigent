@@ -170,6 +170,18 @@ def test_scan_ignores_tests(tmp_path: Path) -> None:
     assert scan(test_file) == []
 
 
+def test_scan_ignores_example_agent_spec_bundles(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    agent_spec = Path("examples/sample/agents/scout/config.yaml")
+    agent_spec.parent.mkdir(parents=True)
+    agent_spec.write_text("model: claude-haiku-4-5\n")
+
+    assert scan(agent_spec) == []
+
+
 def test_precommit_trigger_matches_scan_surface() -> None:
     config = yaml.safe_load(Path(".pre-commit-config.yaml").read_text())
     hook = next(

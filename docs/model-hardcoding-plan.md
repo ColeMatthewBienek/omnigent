@@ -26,7 +26,8 @@ provenance, and the discovery gap that prevents a live listing.
 The hook scans tracked Python, YAML, JSON, TOML, and shell files across the
 repository. Python AST analysis checks every non-docstring string literal;
 config and shell files check every non-comment line. Tests, Markdown/prose,
-TypeScript/JavaScript, generated OpenAPI, and vendor/build trees are excluded.
+TypeScript/JavaScript, generated OpenAPI, example agent-spec `config.yaml`
+files, and vendor/build trees are excluded.
 
 Concrete model ids in runtime help, logs, and errors are production literals
 and therefore fail lint. Use provider-neutral wording or synthetic identifier
