@@ -1484,7 +1484,8 @@ def build_hook_settings(
             # with the subprocess/AP-side budgets so none caps first.
             "timeout": 86400,
         }
-        hooks["PermissionRequest"] = [{"hooks": [permission_hook]}]
+        if launch_permission_mode != "bypassPermissions":
+            hooks["PermissionRequest"] = [{"hooks": [permission_hook]}]
 
         # Policy-gate native Claude Code tools, not just relay/MCP tools.
         # The hook is a bare curl against the relay's evaluate-policy
@@ -1550,15 +1551,15 @@ def build_hook_settings(
         # callable. A session launched with ``--disallowedTools AskUserQuestion``
         # (e.g. the exit-plan-mode e2e fixture) can never trigger this hook, so
         # the registration is dormant there — harmless, just never reached.
-        hooks["PreToolUse"] = [
-            {"matcher": "AskUserQuestion", "hooks": [ask_uq_hook]},
-            {"hooks": [evaluate_policy_hook]},
-        ]
+        hooks["PreToolUse"] = [{"matcher": "AskUserQuestion", "hooks": [ask_uq_hook]}]
+        if launch_permission_mode != "bypassPermissions":
+            hooks["PreToolUse"].append({"hooks": [evaluate_policy_hook]})
         # PostToolUse already has TodoWrite and TaskUpdate matchers
         # for the transcript forwarder (the observer ``hook``). Append
         # a catch-all policy evaluation entry so TOOL_RESULT policies
         # fire for all tools, not just the forwarder-specific ones.
-        hooks["PostToolUse"].append({"hooks": [evaluate_policy_hook]})
+        if launch_permission_mode != "bypassPermissions":
+            hooks["PostToolUse"].append({"hooks": [evaluate_policy_hook]})
         # UserPromptSubmit already carries the transcript forwarder's
         # status hook (running). Append the policy hook so REQUEST-phase
         # policies gate native prompts — for native sessions this is the
@@ -1567,7 +1568,8 @@ def build_hook_settings(
         # dropping the prompt before the model sees it; ASK is resolved
         # server-side. Covers both web-UI-injected and direct-terminal
         # prompts, since both fire UserPromptSubmit.
-        hooks["UserPromptSubmit"].append({"hooks": [evaluate_policy_hook]})
+        if launch_permission_mode != "bypassPermissions":
+            hooks["UserPromptSubmit"].append({"hooks": [evaluate_policy_hook]})
     if subagent_router_dir is not None:
         # Route natively spawned subagents (the Task/Agent tool) through
         # the runner's route-subagent endpoint. Settings-level hooks also

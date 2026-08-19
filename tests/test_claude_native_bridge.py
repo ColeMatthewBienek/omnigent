@@ -2939,6 +2939,29 @@ def test_augment_claude_args_registers_permission_command_hook(
     assert "context_raw.json" in settings["statusLine"]["command"]
 
 
+def test_augment_claude_args_bypass_permissions_omits_approval_hooks(
+    tmp_path: Path,
+) -> None:
+    """Bypass mode never installs hooks that can create approval cards."""
+    args = augment_claude_args(
+        ("--permission-mode", "bypassPermissions"),
+        bridge_dir=tmp_path,
+        python_executable="/venv/bin/python",
+        ap_server_url="http://127.0.0.1:8787/",
+        ap_auth_headers={"Authorization": "Bearer xyz"},
+    )
+
+    settings = _load_invocation_settings(args)
+    assert "PermissionRequest" not in settings["hooks"]
+    commands = [
+        hook["command"]
+        for entries in settings["hooks"].values()
+        for entry in entries
+        for hook in entry["hooks"]
+    ]
+    assert all("evaluate-policy" not in command for command in commands)
+
+
 def test_augment_claude_args_registers_user_prompt_submit_policy_hook(
     tmp_path: Path,
 ) -> None:
