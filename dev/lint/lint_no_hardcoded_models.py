@@ -39,6 +39,7 @@ MODEL_ID_RE = re.compile(
 TEXT_EXTENSIONS = {".json", ".toml", ".yaml", ".yml", ".sh"}
 SOURCE_EXTENSIONS = {".py", *TEXT_EXTENSIONS}
 GENERATED_PATHS = {Path("openapi.json")}
+EXAMPLE_AGENT_SPEC_ROOT = Path("examples")
 SKIP_PARTS = {
     ".git",
     ".mypy_cache",
@@ -75,6 +76,13 @@ def _repo_relative(path: Path) -> str:
 def _extract_models(text: str) -> list[str]:
     """Return hardcoded model ids in ``text``."""
     return [match.group(0) for match in MODEL_ID_RE.finditer(text)]
+
+
+def _is_example_agent_spec(path: Path) -> bool:
+    """Return whether *path* is an intentionally pinned example agent spec."""
+    return path.name in {"config.yaml", "config.yml"} and path.parts[:1] == (
+        EXAMPLE_AGENT_SPEC_ROOT.name,
+    )
 
 
 def _literal_string_nodes(node: ast.expr) -> tuple[ast.Constant, ...] | None:
@@ -210,10 +218,12 @@ def _scan_text(path: Path) -> list[Hit]:
 
 def scan(path: Path) -> list[Hit]:
     """Return hardcoded model hits in ``path``."""
+    repo_path = Path(_repo_relative(path))
     if (
         not path.is_file()
         or path.suffix not in SOURCE_EXTENSIONS
-        or Path(_repo_relative(path)) in GENERATED_PATHS
+        or repo_path in GENERATED_PATHS
+        or _is_example_agent_spec(repo_path)
         or any(part in SKIP_PARTS for part in path.parts)
     ):
         return []
@@ -233,6 +243,7 @@ def _iter_scannable_paths() -> list[Path]:
         if raw_path
         if (path := Path(raw_path)).suffix in SOURCE_EXTENSIONS
         if path not in GENERATED_PATHS
+        if not _is_example_agent_spec(path)
         if not any(part in SKIP_PARTS for part in path.parts)
     ]
 
