@@ -733,48 +733,60 @@ class _RangeNotSatisfiable(Exception):
     """A ``Range`` header asked for bytes outside the representation."""
 
 
+# A range offset is bare ASCII digits and nothing else. ``int()`` is far
+# more permissive — it accepts "+0", " 1", "1_0", and non-ASCII digits —
+# which would let a malformed spec through as a satisfiable range.
+_RANGE_OFFSET_RE = re.compile(r"^[0-9]+$")
+
+
 def _parse_byte_range(header: str | None, size: int) -> tuple[int, int] | None:
     """Resolve a ``Range`` request header against a representation size.
 
     Implements the single-range ``bytes`` form iOS Safari uses to seek
     inside a video. Anything else — a missing header, a non-``bytes``
     unit, a malformed spec, or a multi-range request — returns ``None``,
-    which callers answer with a normal 200 (a server is always allowed
-    to ignore a range).
+    which callers answer with a normal 200 (RFC 9110 requires an
+    unparseable ``Range`` to be ignored rather than rejected).
 
     :param header: Raw ``Range`` value, or ``None`` when absent.
     :param size: Total size of the representation in bytes.
     :returns: Inclusive ``(start, end)`` offsets, or ``None`` to serve
         the whole representation.
-    :raises _RangeNotSatisfiable: The range is well-formed but asks for
-        bytes past the end, which must be answered with 416.
+    :raises _RangeNotSatisfiable: The range is well-formed but cannot be
+        satisfied — it starts past the end, or the representation is
+        empty — which must be answered with 416.
     """
-    if not header or size <= 0:
+    if not header:
         return None
-    unit, _, spec = header.partition("=")
-    if unit.strip().lower() != "bytes" or "," in spec:
+    unit, sep_eq, spec = header.partition("=")
+    if not sep_eq or unit.strip().lower() != "bytes":
         return None
-    first, sep, last = spec.strip().partition("-")
+    spec = spec.strip()
+    if "," in spec:
+        return None
+    first, sep, last = spec.partition("-")
     if not sep:
         return None
-    try:
-        if not first:
-            # Suffix form: the final N bytes.
-            suffix = int(last)
-            if suffix <= 0:
-                raise _RangeNotSatisfiable(header)
-            return max(0, size - suffix), size - 1
-        start = int(first)
-        end = int(last) if last else size - 1
-    except ValueError:
+    if first and not _RANGE_OFFSET_RE.match(first):
         return None
-    if start < 0:
+    if last and not _RANGE_OFFSET_RE.match(last):
         return None
+    if not first:
+        if not last:
+            return None
+        # Suffix form: the final N bytes. A zero-length suffix names no
+        # bytes, and an empty representation has none to give.
+        suffix = int(last)
+        if suffix <= 0 or size <= 0:
+            raise _RangeNotSatisfiable(header)
+        return max(0, size - suffix), size - 1
+    start = int(first)
     # Order matters: a spec whose start is past the end is unsatisfiable
-    # (416), even when its end also parses below the start.
-    if start >= size:
+    # (416), even when its end also parses below the start. An empty
+    # representation can satisfy no range at all.
+    if size <= 0 or start >= size:
         raise _RangeNotSatisfiable(header)
-    end = min(end, size - 1)
+    end = min(int(last), size - 1) if last else size - 1
     if end < start:
         return None
     return start, end

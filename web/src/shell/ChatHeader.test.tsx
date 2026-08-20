@@ -1,4 +1,4 @@
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { MemoryRouter } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -65,6 +65,8 @@ function renderHeader(props: {
   canShare?: boolean;
   shareDisabled?: boolean;
   shareDisabledReason?: string;
+  onOpenArtifacts?: () => void;
+  artifactCount?: number;
 }) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
@@ -95,6 +97,8 @@ function renderHeader(props: {
             hasRailContent={false}
             rightPanelOpen={false}
             onToggleRightPanel={() => {}}
+            onOpenArtifacts={props.onOpenArtifacts ?? (() => {})}
+            artifactCount={props.artifactCount ?? 0}
             mobileMenu={mobileMenu}
           />
         </TooltipProvider>
@@ -344,6 +348,8 @@ function renderHeaderWithSession(ctx: TerminalFirstContextValue | null) {
                 hasRailContent={false}
                 rightPanelOpen={false}
                 onToggleRightPanel={() => {}}
+                onOpenArtifacts={() => {}}
+                artifactCount={0}
                 mobileMenu={mobileMenu}
               />
             </TerminalFirstContextProvider>
@@ -366,6 +372,8 @@ function renderHeaderWithSession(ctx: TerminalFirstContextValue | null) {
               hasRailContent={false}
               rightPanelOpen={false}
               onToggleRightPanel={() => {}}
+              onOpenArtifacts={() => {}}
+              artifactCount={0}
               mobileMenu={mobileMenu}
             />
           )}
@@ -391,5 +399,39 @@ describe("ChatHeader — Chat/Terminal switcher wiring", () => {
   it("omits the toggle when there is no TerminalFirst context", () => {
     renderHeaderWithSession(null);
     expect(screen.queryByRole("group", { name: /switch between chat and terminal/i })).toBeNull();
+  });
+});
+
+describe("ChatHeader — desktop Artifacts entry", () => {
+  it("opens the artifacts panel from the desktop header button", () => {
+    const onOpenArtifacts = vi.fn();
+    renderHeader({ sidebarOpen: true, conversationId: "conv-1", onOpenArtifacts });
+
+    const button = screen.getByRole("button", { name: "Artifacts" });
+    // The panel is a desktop right-rail push panel; the mobile route in is
+    // the session menu, so this button is the md+ affordance.
+    expect(button).toHaveClass("md:inline-flex");
+
+    fireEvent.click(button);
+    expect(onOpenArtifacts).toHaveBeenCalledTimes(1);
+  });
+
+  it("badges the button once artifacts are published", () => {
+    renderHeader({ sidebarOpen: true, conversationId: "conv-1", artifactCount: 3 });
+
+    expect(screen.getByTestId("artifact-count-badge")).toHaveTextContent("3");
+  });
+
+  it("shows no badge before the first artifact lands", () => {
+    renderHeader({ sidebarOpen: true, conversationId: "conv-1" });
+
+    expect(screen.getByRole("button", { name: "Artifacts" })).not.toBeNull();
+    expect(screen.queryByTestId("artifact-count-badge")).toBeNull();
+  });
+
+  it("stays unmounted with no active session", () => {
+    renderHeader({ sidebarOpen: true });
+
+    expect(screen.queryByRole("button", { name: "Artifacts" })).toBeNull();
   });
 });

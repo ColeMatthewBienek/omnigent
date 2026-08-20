@@ -6022,14 +6022,17 @@ async def _execute_artifact_tool(
         :returns: The parsed resource dict, or an ``"Error: …"`` string.
         """
         try:
+            # Streamed from the open handle rather than read into memory:
+            # an artifact is a whole render (the media cap is 512 MB by
+            # default), and the runner has no reason to hold one resident
+            # just to hand it to the server.
             with open(target, "rb") as handle:
-                content = handle.read()
-            resp = await server_client.post(
-                artifacts_path,
-                files={"file": (target.name, content)},
-                data=form,
-                timeout=300.0,
-            )
+                resp = await server_client.post(
+                    artifacts_path,
+                    files={"file": (target.name, handle)},
+                    data=form,
+                    timeout=300.0,
+                )
         except Exception as exc:  # noqa: BLE001
             return f"Error: publish_artifact failed: {exc}"
         if resp.status_code not in (200, 201):

@@ -337,6 +337,55 @@ async def test_content_rejects_an_unsatisfiable_range(client: httpx.AsyncClient)
 
 
 @pytest.mark.asyncio
+async def test_zero_byte_artifact_cannot_satisfy_a_range(client: httpx.AsyncClient) -> None:
+    """An empty representation satisfies no range — 416, not a silent 200."""
+    published = await _publish(client, "empty.mp4", b"", "video/mp4")
+    assert published.status_code == 201
+    artifact_id = published.json()["id"]
+    path = f"/v1/sessions/{_SID}/resources/artifacts/{artifact_id}/content"
+
+    ranged = await client.get(path, headers={"Range": "bytes=0-"})
+    assert ranged.status_code == 416
+    assert ranged.headers["content-range"] == "bytes */0"
+
+    # Without a Range the empty body is still a normal 200.
+    whole = await client.get(path)
+    assert whole.status_code == 200
+    assert whole.content == b""
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "bad_range",
+    [
+        "bytes=+0-1",  # int() accepts a leading sign; the grammar does not
+        "bytes=1_0-20",  # int() accepts underscore separators
+        "bytes=abc-1",
+        "bytes=1-abc",
+        "bytes=-",
+        "bytes=--1",
+        "bytes=0",  # no "-" at all
+        "chunks=0-1",  # unit we do not implement
+    ],
+)
+async def test_content_ignores_a_malformed_range(
+    client: httpx.AsyncClient,
+    bad_range: str,
+) -> None:
+    """A malformed spec is ignored (full 200), never honoured as a slice."""
+    published = await _publish(client, "clip.mp4", _MP4, "video/mp4")
+    artifact_id = published.json()["id"]
+
+    resp = await client.get(
+        f"/v1/sessions/{_SID}/resources/artifacts/{artifact_id}/content",
+        headers={"Range": bad_range},
+    )
+    assert resp.status_code == 200, bad_range
+    assert resp.content == _MP4
+    assert "content-range" not in resp.headers
+
+
+@pytest.mark.asyncio
 async def test_content_ignores_a_multi_range_request(client: httpx.AsyncClient) -> None:
     """Multi-range is not implemented, so the whole body is served instead."""
     published = await _publish(client, "clip.mp4", _MP4, "video/mp4")
@@ -375,6 +424,30 @@ async def test_audio_and_image_are_served_inline(client: httpx.AsyncClient) -> N
         artifact_id = published.json()["id"]
         resp = await client.get(f"/v1/sessions/{_SID}/resources/artifacts/{artifact_id}/content")
         assert resp.headers["content-disposition"].startswith("inline;"), filename
+
+
+@pytest.mark.asyncio
+async def test_svg_is_never_served_inline(client: httpx.AsyncClient) -> None:
+    """An SVG is an active document — it must never render on our origin.
+
+    ``image/svg+xml`` lands in the ``image`` render category, so a
+    category-based disposition rule would serve it inline and execute the
+    embedded script. ``nosniff`` does not help: the declared type is
+    honest, and the browser runs SVG script on navigation.
+    """
+    svg = b'<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>'
+    published = await _publish(client, "chart.svg", svg, "image/svg+xml")
+    # Publishing may be refused outright; what must never happen is an
+    # inline 200.
+    if published.status_code == 415:
+        return
+    assert published.status_code == 201
+    artifact_id = published.json()["id"]
+
+    resp = await client.get(f"/v1/sessions/{_SID}/resources/artifacts/{artifact_id}/content")
+    assert resp.status_code == 200
+    assert resp.headers["content-disposition"].startswith("attachment;")
+    assert resp.headers["x-content-type-options"] == "nosniff"
 
 
 @pytest.mark.asyncio

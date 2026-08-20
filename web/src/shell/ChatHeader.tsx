@@ -156,6 +156,10 @@ interface ChatHeaderProps {
   rightPanelOpen: boolean;
   /** Toggle the right workspace panel. */
   onToggleRightPanel: () => void;
+  /** Open the artifacts panel (desktop right rail / mobile drawer). */
+  onOpenArtifacts: () => void;
+  /** Number of published artifacts (Artifacts button badge). */
+  artifactCount: number;
   /** Gating + handlers for the mobile session-menu FAB. */
   mobileMenu: MobileSessionMenuProps;
 }
@@ -171,7 +175,7 @@ interface ChatHeaderProps {
  * terminal-first via ``pt-14``). Left slot: open-sidebar + a conversation
  * breadcrumb (``[folder] / <title> [/ <sub-agent>]``). Right slot: desktop
  * action buttons (Agent info ·
- * Share · right-panel toggle), a mobile three-dot menu mirroring the
+ * Share · Artifacts · right-panel toggle), a mobile three-dot menu mirroring the
  * same actions, and a mobile FAB that opens the rail tabs as
  * full-screen drawers. Stop session lives in the sidebar row's kebab
  * menu; Clone lives on each assistant message's "Fork from here"
@@ -200,6 +204,8 @@ export function ChatHeader({
   hasRailContent,
   rightPanelOpen,
   onToggleRightPanel,
+  onOpenArtifacts,
+  artifactCount,
   mobileMenu,
 }: ChatHeaderProps) {
   // Dwell on the toggle for 1s to peek the sidebar; leaving before then cancels
@@ -405,6 +411,39 @@ export function ChatHeader({
             Share
           </Button>
         ) : null}
+        {/* Artifacts — the agent's published deliverables. Always offered
+            on desktop (not gated on hasRailContent: artifacts are their own
+            panel, not a workspace-rail tab), so the user can check for work
+            before the first one lands. The mobile route in is the session
+            menu below. */}
+        {conversationId && (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-xs"
+                aria-label="Artifacts"
+                onClick={onOpenArtifacts}
+                className="relative hidden md:inline-flex text-muted-foreground hover:text-foreground border-none"
+              >
+                <SparklesIcon className="size-4" />
+                {artifactCount > 0 && (
+                  <span
+                    data-testid="artifact-count-badge"
+                    className={cn(
+                      TAB_BADGE_BASE,
+                      "absolute -right-1 -top-1 bg-muted text-muted-foreground",
+                    )}
+                  >
+                    {artifactCount}
+                  </span>
+                )}
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>Artifacts</TooltipContent>
+          </Tooltip>
+        )}
         {conversationId && hasRailContent && (
           <Tooltip>
             <TooltipTrigger asChild>

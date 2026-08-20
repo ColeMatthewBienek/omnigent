@@ -35,7 +35,7 @@ from omnigent.native_coding_agents import (
 )
 from omnigent.runner.routing import RunnerRouter
 from omnigent.runtime.policies.approval import _ELICITATION_MODE
-from omnigent.runtime.session_artifacts import INLINE_RENDER_CATEGORIES
+from omnigent.runtime.session_artifacts import is_inline_servable
 from omnigent.server._elicitation_registry import (
     _harness_elicitation_owners,
     _harness_elicitation_registry,
@@ -1674,12 +1674,14 @@ def register_resources_routes(
         a video seekable in iOS Safari, which refuses to scrub a response
         that can't be ranged.
 
-        Disposition is decided from the server-derived render category, not
-        from anything the publisher said: image / video / audio / PDF are
-        served ``inline`` so the browser can play them in place; HTML and
-        any unrecognised type are always ``attachment``. Artifact bytes are
-        agent-authored, so an inline ``text/html`` response would be stored
-        XSS in the server's own origin.
+        Disposition is decided server-side from an explicit allowlist of
+        passive types, not from anything the publisher said: raster images,
+        video, audio, and PDF are served ``inline`` so the browser can play
+        them in place. Everything else — HTML, SVG, any unrecognised type —
+        is always ``attachment``. Artifact bytes are agent-authored, so an
+        inline ``text/html`` *or* ``image/svg+xml`` response would be stored
+        XSS in the server's own origin; both are active documents and
+        ``nosniff`` does not make either inert.
 
         :param request: The incoming FastAPI request (for auth).
         :param session_id: Session/conversation identifier.
@@ -1709,7 +1711,7 @@ def register_resources_routes(
         if _if_none_match_matches(request.headers.get("if-none-match"), etag):
             return Response(status_code=304, headers=base_headers)
 
-        inline = artifact.render_category in INLINE_RENDER_CATEGORIES
+        inline = is_inline_servable(artifact.content_type)
         disposition = (
             _inline_disposition(artifact.filename)
             if inline

@@ -1673,6 +1673,8 @@ export function AppShell() {
                   hasRailContent={hasRailContent}
                   rightPanelOpen={rightPanelOpen}
                   onToggleRightPanel={toggleRightPanel}
+                  onOpenArtifacts={openArtifactsPanel}
+                  artifactCount={artifacts.length}
                   mobileMenu={{
                     fileViewerOpen,
                     panelOpen,
