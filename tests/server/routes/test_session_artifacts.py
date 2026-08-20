@@ -386,6 +386,32 @@ async def test_content_ignores_a_malformed_range(
 
 
 @pytest.mark.asyncio
+async def test_content_ignores_an_offset_too_long_to_parse(
+    client: httpx.AsyncClient,
+) -> None:
+    """A digit run past CPython's int-parse limit is malformed, not a 500.
+
+    CPython refuses to build an int from more than 4300 digits, so an
+    all-digit offset that long satisfies the syntax check and then blows
+    up inside ``int()`` — reachable from a plain header, well under any
+    proxy's size limit. Treated as malformed in every position, which
+    means the header is ignored and the full body is served: mapping it
+    to 416 would be wrong for the suffix form, where an over-long
+    suffix-length means "the whole representation".
+    """
+    published = await _publish(client, "clip.mp4", _MP4, "video/mp4")
+    artifact_id = published.json()["id"]
+    path = f"/v1/sessions/{_SID}/resources/artifacts/{artifact_id}/content"
+    huge = "9" * 4301
+
+    for bad_range in (f"bytes={huge}-", f"bytes=-{huge}", f"bytes=0-{huge}"):
+        resp = await client.get(path, headers={"Range": bad_range})
+        assert resp.status_code == 200, bad_range
+        assert resp.content == _MP4, bad_range
+        assert "content-range" not in resp.headers, bad_range
+
+
+@pytest.mark.asyncio
 async def test_content_ignores_a_multi_range_request(client: httpx.AsyncClient) -> None:
     """Multi-range is not implemented, so the whole body is served instead."""
     published = await _publish(client, "clip.mp4", _MP4, "video/mp4")

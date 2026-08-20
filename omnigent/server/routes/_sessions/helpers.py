@@ -736,7 +736,12 @@ class _RangeNotSatisfiable(Exception):
 # A range offset is bare ASCII digits and nothing else. ``int()`` is far
 # more permissive — it accepts "+0", " 1", "1_0", and non-ASCII digits —
 # which would let a malformed spec through as a satisfiable range.
-_RANGE_OFFSET_RE = re.compile(r"^[0-9]+$")
+#
+# The length cap matters as much as the character class: CPython refuses
+# to parse an integer literal past 4300 digits, so an all-digit offset
+# that long would match and then raise inside ``int()``. 19 digits spans
+# the whole 64-bit range, so nothing addressable is turned away.
+_RANGE_OFFSET_RE = re.compile(r"^[0-9]{1,19}$")
 
 
 def _parse_byte_range(header: str | None, size: int) -> tuple[int, int] | None:
@@ -744,9 +749,10 @@ def _parse_byte_range(header: str | None, size: int) -> tuple[int, int] | None:
 
     Implements the single-range ``bytes`` form iOS Safari uses to seek
     inside a video. Anything else — a missing header, a non-``bytes``
-    unit, a malformed spec, or a multi-range request — returns ``None``,
-    which callers answer with a normal 200 (RFC 9110 requires an
-    unparseable ``Range`` to be ignored rather than rejected).
+    unit, a malformed spec, an offset too long to be a real position, or
+    a multi-range request — returns ``None``, which callers answer with a
+    normal 200 (RFC 9110 requires an unparseable ``Range`` to be ignored
+    rather than rejected).
 
     :param header: Raw ``Range`` value, or ``None`` when absent.
     :param size: Total size of the representation in bytes.
