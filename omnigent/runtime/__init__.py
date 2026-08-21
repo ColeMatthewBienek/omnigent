@@ -21,6 +21,7 @@ if TYPE_CHECKING:
         ArtifactStore,
         ConversationStore,
         FileStore,
+        SessionArtifactStore,
     )
     from omnigent.stores.comment_store import CommentStore
     from omnigent.stores.policy_store import PolicyStore
@@ -35,6 +36,7 @@ def init(
     agent_cache: AgentCache,
     file_store: FileStore | None = None,
     artifact_store: ArtifactStore | None = None,
+    session_artifact_store: SessionArtifactStore | None = None,
     comment_store: CommentStore | None = None,
     policy_store: PolicyStore | None = None,
     caps: RuntimeCaps | None = None,
@@ -55,6 +57,10 @@ def init(
     :param artifact_store: The ArtifactStore instance for
         fetching file binary content during resolution.
         ``None`` disables multimodal file_id resolution.
+    :param session_artifact_store: The SessionArtifactStore
+        instance for artifacts published by ``publish_artifact``.
+        ``None`` makes the tool report that publishing is
+        unavailable.
     :param comment_store: The CommentStore instance for
         per-session review comments. ``None`` when comments
         are not configured (e.g. local dev or CLI mode).
@@ -70,6 +76,7 @@ def init(
         agent_cache=agent_cache,
         file_store=file_store,
         artifact_store=artifact_store,
+        session_artifact_store=session_artifact_store,
         comment_store=comment_store,
         policy_store=policy_store,
         caps=caps,
@@ -128,6 +135,21 @@ def get_artifact_store() -> ArtifactStore | None:
     :returns: The ArtifactStore set during :func:`init`, or ``None``.
     """
     return _globals._artifact_store
+
+
+def get_session_artifact_store() -> SessionArtifactStore | None:
+    """
+    Return the SessionArtifactStore instance, or ``None`` if not
+    configured.
+
+    Returns ``None`` (rather than raising) because the store is
+    optional — ``publish_artifact`` reports that publishing is
+    unavailable instead of failing the turn.
+
+    :returns: The SessionArtifactStore set during :func:`init`, or
+        ``None``.
+    """
+    return _globals._session_artifact_store
 
 
 def get_comment_store() -> CommentStore | None:

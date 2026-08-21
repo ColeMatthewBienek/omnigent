@@ -223,6 +223,53 @@
         "title": "AutomaticSessionRenameResponse",
         "type": "object"
       },
+      "Body_publish_session_artifact_v1_sessions__session_id__resources_artifacts_post": {
+        "properties": {
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "file": {
+            "contentMediaType": "application/octet-stream",
+            "title": "File",
+            "type": "string"
+          },
+          "preview_artifact_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Preview Artifact Id"
+          },
+          "title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Title"
+          }
+        },
+        "required": [
+          "file"
+        ],
+        "title": "Body_publish_session_artifact_v1_sessions__session_id__resources_artifacts_post",
+        "type": "object"
+      },
       "Body_update_session_agent_v1_sessions__session_id__agent_put": {
         "properties": {
           "bundle": {
@@ -11244,6 +11291,232 @@
           }
         },
         "summary": "List Session Resources",
+        "tags": [
+          "session_resources"
+        ]
+      }
+    },
+    "/v1/sessions/{session_id}/resources/artifacts": {
+      "get": {
+        "description": "List a session's published artifacts, newest first.\n\nEach entry carries the server-derived `render_category` so a\nclient picks its renderer from the server's decision rather than\nsniffing the bytes.\n\n**Returns:** `PaginatedList` of session artifact resources.",
+        "operationId": "list_session_artifacts_v1_sessions__session_id__resources_artifacts_get",
+        "parameters": [
+          {
+            "description": "Session/conversation identifier.",
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Maximum number of artifacts to return.",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 100,
+              "maximum": 1000,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Cursor artifact id for forward pagination.",
+            "in": "query",
+            "name": "after",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "After"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Session Artifacts",
+        "tags": [
+          "session_resources"
+        ]
+      },
+      "post": {
+        "description": "Publish an artifact into the session's artifact namespace.\n\nThe MIME type is resolved server-side and checked against the\nartifact allowlist; the per-type cap is applied *before* the body\nis buffered, so an over-sized publish is rejected without reading\nit. On success the artifact is announced on the session stream as\na `session.resource.created` event.\n\n**Parameters**\n\n- `file` \u2014 The artifact content (multipart form data).\n- `title` \u2014 Optional human-facing title.\n- `description` \u2014 Optional human-facing description.\n- `preview_artifact_id` \u2014 Optional id of an artifact in this same session that previews this one, e.g. a video poster.\n\n**Returns:** The session artifact resource object.",
+        "operationId": "publish_session_artifact_v1_sessions__session_id__resources_artifacts_post",
+        "parameters": [
+          {
+            "description": "Session/conversation identifier.",
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_publish_session_artifact_v1_sessions__session_id__resources_artifacts_post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Publish Session Artifact",
+        "tags": [
+          "session_resources"
+        ]
+      }
+    },
+    "/v1/sessions/{session_id}/resources/artifacts/{artifact_id}": {
+      "get": {
+        "description": "Retrieve metadata for one published artifact.\n\n**Returns:** The session artifact resource object.",
+        "operationId": "get_session_artifact_v1_sessions__session_id__resources_artifacts__artifact_id__get",
+        "parameters": [
+          {
+            "description": "Session/conversation identifier.",
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Unique artifact identifier.",
+            "in": "path",
+            "name": "artifact_id",
+            "required": true,
+            "schema": {
+              "title": "Artifact Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Session Artifact",
+        "tags": [
+          "session_resources"
+        ]
+      }
+    },
+    "/v1/sessions/{session_id}/resources/artifacts/{artifact_id}/content": {
+      "get": {
+        "description": "Stream an artifact's bytes, with byte-range support.\n\nServes `Accept-Ranges: bytes` and answers a single-range\n`Range` request with 206 + `Content-Range`. That is what makes\na video seekable in iOS Safari, which refuses to scrub a response\nthat can't be ranged.\n\nDisposition is decided from the server-derived render category, not\nfrom anything the publisher said: image / video / audio / PDF are\nserved `inline` so the browser can play them in place; HTML and\nany unrecognised type are always `attachment`. Artifact bytes are\nagent-authored, so an inline `text/html` response would be stored\nXSS in the server's own origin.\n\n**Returns:** 200 with the whole representation, 206 for a satisfied range, 304 for a still-valid cached copy, or 416.",
+        "operationId": "get_session_artifact_content_v1_sessions__session_id__resources_artifacts__artifact_id__content_get",
+        "parameters": [
+          {
+            "description": "Session/conversation identifier.",
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Unique artifact identifier.",
+            "in": "path",
+            "name": "artifact_id",
+            "required": true,
+            "schema": {
+              "title": "Artifact Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Session Artifact Content",
         "tags": [
           "session_resources"
         ]

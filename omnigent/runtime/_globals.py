@@ -22,6 +22,7 @@ if TYPE_CHECKING:
         ArtifactStore,
         ConversationStore,
         FileStore,
+        SessionArtifactStore,
     )
     from omnigent.stores.comment_store import CommentStore
     from omnigent.stores.policy_store import PolicyStore
@@ -34,6 +35,7 @@ _agent_store: AgentStore | None = None
 _agent_cache: AgentCache | None = None
 _file_store: FileStore | None = None
 _artifact_store: ArtifactStore | None = None
+_session_artifact_store: SessionArtifactStore | None = None
 _comment_store: CommentStore | None = None
 _policy_store: PolicyStore | None = None
 _caps: RuntimeCaps = RuntimeCaps()
@@ -174,6 +176,7 @@ def init(
     agent_cache: AgentCache,
     file_store: FileStore | None = None,
     artifact_store: ArtifactStore | None = None,
+    session_artifact_store: SessionArtifactStore | None = None,
     comment_store: CommentStore | None = None,
     policy_store: PolicyStore | None = None,
     caps: RuntimeCaps | None = None,
@@ -195,6 +198,10 @@ def init(
         fetching file binary content during content
         resolution. ``None`` disables multimodal file_id
         resolution.
+    :param session_artifact_store: The SessionArtifactStore
+        instance for artifacts published by ``publish_artifact``.
+        ``None`` makes the tool report that publishing is
+        unavailable.
     :param comment_store: The CommentStore instance for
         per-session review comments. ``None`` when comments
         are not configured (e.g. local dev or CLI mode);
@@ -213,11 +220,13 @@ def init(
     global _conversation_store, _agent_store
     global _agent_cache, _file_store, _artifact_store, _caps
     global _terminal_registry, _comment_store, _policy_store
+    global _session_artifact_store
     _conversation_store = conversation_store
     _agent_store = agent_store
     _agent_cache = agent_cache
     _file_store = file_store
     _artifact_store = artifact_store
+    _session_artifact_store = session_artifact_store
     _comment_store = comment_store
     _policy_store = policy_store
     _caps = caps if caps is not None else RuntimeCaps()

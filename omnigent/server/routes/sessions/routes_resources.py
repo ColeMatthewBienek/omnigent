@@ -7,7 +7,7 @@ import functools
 import mimetypes
 import ntpath
 import urllib.parse
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterator
 from pathlib import Path
 from typing import Annotated, Any, cast
 
@@ -16,12 +16,13 @@ from fastapi import (
     APIRouter,
     Depends,
     File,
+    Form,
     HTTPException,
     Query,
     Request,
     UploadFile,
 )
-from fastapi.responses import Response
+from fastapi.responses import Response, StreamingResponse
 
 from omnigent.entities import (
     Conversation,
@@ -34,6 +35,7 @@ from omnigent.native_coding_agents import (
 )
 from omnigent.runner.routing import RunnerRouter
 from omnigent.runtime.policies.approval import _ELICITATION_MODE
+from omnigent.runtime.session_artifacts import is_inline_servable
 from omnigent.server._elicitation_registry import (
     _harness_elicitation_owners,
     _harness_elicitation_registry,
@@ -73,11 +75,15 @@ from omnigent.server.routes._sessions.helpers import (
     _file_content_etag,
     _get_runner_client_for_resource_access,
     _if_none_match_matches,
+    _inline_disposition,
     _load_agent_spec_for_session,
+    _parse_byte_range,
     _proxy_get_session_resources_to_runner,
     _publish_and_persist_resource_event,
     _publish_changed_files_invalidated,
+    _RangeNotSatisfiable,
     _read_upload_capped,
+    _session_artifact_to_resource,
     _stored_file_to_resource,
 )
 from omnigent.server.routes._sessions.orchestration import (
@@ -94,6 +100,23 @@ from omnigent.stores import AgentStore, ConversationStore
 from omnigent.stores.artifact_store import ArtifactStore
 from omnigent.stores.file_store import FileStore
 from omnigent.stores.permission_store import PermissionStore
+from omnigent.stores.session_artifact_store import SessionArtifactStore
+
+# Chunk size for writing artifact bytes back to the client. The
+# ArtifactStore interface hands back a whole blob, so this bounds what a
+# single socket write holds, not what the process reads; streaming the
+# blob itself needs a ranged read on the store interface (deferred).
+_ARTIFACT_STREAM_CHUNK_BYTES = 256 * 1024
+
+
+def _iter_artifact_chunks(content: bytes) -> Iterator[bytes]:
+    """Yield *content* in fixed-size chunks for a streaming response.
+
+    :param content: The bytes to send.
+    :returns: An iterator over chunks.
+    """
+    for offset in range(0, len(content), _ARTIFACT_STREAM_CHUNK_BYTES):
+        yield content[offset : offset + _ARTIFACT_STREAM_CHUNK_BYTES]
 
 
 def register_resources_routes(
@@ -103,6 +126,7 @@ def register_resources_routes(
     agent_store: AgentStore,
     file_store: FileStore | None = None,
     artifact_store: ArtifactStore | None = None,
+    session_artifact_store: SessionArtifactStore | None = None,
     runner_router: RunnerRouter | None = None,
     auth_provider: AuthProvider | None = None,
     permission_store: PermissionStore | None = None,
@@ -1439,6 +1463,289 @@ def register_resources_routes(
             "object": "session.resource.deleted",
             "deleted": True,
         }
+
+    # ── Session artifacts: agent-published work products ───────────
+    #
+    # Deliberately a separate surface from ``/resources/files``: files are
+    # attachments that get inlined into the model's context (hence the
+    # image/PDF/text-only allowlist and the forced download), while
+    # artifacts are finished work a human reviews in the UI and never
+    # enter the model context. That is what lets artifacts carry media and
+    # be served inline with real Range support.
+
+    def _require_artifact_stores() -> tuple[SessionArtifactStore, ArtifactStore]:
+        """Return the artifact stores, or 501 when unconfigured.
+
+        :returns: The metadata store and the blob store.
+        :raises HTTPException: 501 when either store is absent.
+        """
+        if session_artifact_store is None or artifact_store is None:
+            raise HTTPException(
+                status_code=501,
+                detail="session artifact store not configured",
+            )
+        return session_artifact_store, artifact_store
+
+    @router.get(
+        "/sessions/{session_id}/resources/artifacts",
+        response_model=None,
+    )
+    async def list_session_artifacts(
+        request: Request,
+        session_id: str,
+        limit: int = Query(default=100, ge=1, le=1000),
+        after: str | None = Query(default=None),
+    ) -> dict[str, Any]:
+        """
+        List a session's published artifacts, newest first.
+
+        Each entry carries the server-derived ``render_category`` so a
+        client picks its renderer from the server's decision rather than
+        sniffing the bytes.
+
+        :param request: The incoming FastAPI request (for auth).
+        :param session_id: Session/conversation identifier.
+        :param limit: Maximum number of artifacts to return.
+        :param after: Cursor artifact id for forward pagination.
+        :returns: ``PaginatedList`` of session artifact resources.
+        """
+        await _validate_session(session_id, request, LEVEL_READ)
+        artifacts, _ = _require_artifact_stores()
+        page = await asyncio.to_thread(
+            artifacts.list,
+            session_id=session_id,
+            limit=limit,
+            after=after,
+        )
+        return {
+            "object": "list",
+            "data": [_session_artifact_to_resource(session_id, a) for a in page.data],
+            "first_id": page.first_id,
+            "last_id": page.last_id,
+            "has_more": page.has_more,
+        }
+
+    @router.post(
+        "/sessions/{session_id}/resources/artifacts",
+        status_code=201,
+        response_model=None,
+        # Same CSRF reasoning as the file upload: multipart is
+        # CORS-safelisted, so a content-type guard can't stop a cross-site
+        # post. require_trusted_origin closes the gap.
+        dependencies=[Depends(require_trusted_origin)],
+    )
+    async def publish_session_artifact(
+        request: Request,
+        session_id: str,
+        file: Annotated[UploadFile, File(...)],
+        title: Annotated[str | None, Form()] = None,
+        description: Annotated[str | None, Form()] = None,
+        preview_artifact_id: Annotated[str | None, Form()] = None,
+    ) -> dict[str, Any]:
+        """
+        Publish an artifact into the session's artifact namespace.
+
+        The MIME type is resolved server-side and checked against the
+        artifact allowlist; the per-type cap is applied *before* the body
+        is buffered, so an over-sized publish is rejected without reading
+        it. On success the artifact is announced on the session stream as
+        a ``session.resource.created`` event.
+
+        :param request: The incoming FastAPI request (for auth).
+        :param session_id: Session/conversation identifier.
+        :param file: The artifact content (multipart form data).
+        :param title: Optional human-facing title.
+        :param description: Optional human-facing description.
+        :param preview_artifact_id: Optional id of an artifact in this
+            same session that previews this one, e.g. a video poster.
+        :returns: The session artifact resource object.
+        """
+        await _validate_session(session_id, request, LEVEL_EDIT)
+        artifacts, blobs = _require_artifact_stores()
+        if not file.filename:
+            raise OmnigentError(
+                "filename is required",
+                code=ErrorCode.INVALID_INPUT,
+            )
+        from omnigent.runtime.session_artifacts import (
+            artifact_upload_limit,
+            render_category_for_content_type,
+            resolve_artifact_content_type,
+        )
+        from omnigent.server.server_config import (
+            artifact_html_bytes_limit,
+            artifact_media_bytes_limit,
+        )
+
+        content_type = resolve_artifact_content_type(file.content_type, file.filename)
+        type_limit = artifact_upload_limit(content_type)
+        if type_limit is None:
+            raise HTTPException(
+                status_code=415,
+                detail=(
+                    f"Unsupported artifact type '{content_type}'. Publishable "
+                    "types are images, video (mp4/quicktime/webm), audio "
+                    "(mpeg/mp4/wav/ogg), PDF, and HTML."
+                ),
+            )
+        # Operator-tunable ceilings override the module defaults for the
+        # two categories a deployment is most likely to want to bound.
+        category = render_category_for_content_type(content_type)
+        if category in ("video", "audio"):
+            type_limit = artifact_media_bytes_limit()
+        elif category == "html":
+            type_limit = artifact_html_bytes_limit()
+
+        if preview_artifact_id is not None:
+            preview = await asyncio.to_thread(artifacts.get, preview_artifact_id, session_id)
+            if preview is None:
+                raise OmnigentError(
+                    "preview_artifact_id does not name an artifact in this session",
+                    code=ErrorCode.INVALID_INPUT,
+                )
+
+        content = await _read_upload_capped(file, type_limit, noun="Artifact")
+        artifact = await asyncio.to_thread(
+            functools.partial(
+                artifacts.create,
+                session_id=session_id,
+                filename=file.filename,
+                content_type=content_type,
+                bytes=len(content),
+                title=title or None,
+                description=description or None,
+                preview_artifact_id=preview_artifact_id,
+            )
+        )
+        # Blob key is the artifact id, which is what the content route reads.
+        await asyncio.to_thread(blobs.put, artifact.id, content)
+        resource = _session_artifact_to_resource(session_id, artifact)
+        _publish_and_persist_resource_event(
+            session_id,
+            "session.resource.created",
+            resource_id=artifact.id,
+            resource_type="session_artifact",
+            conversation_store=conversation_store,
+            resource=resource,
+        )
+        return resource
+
+    @router.get(
+        "/sessions/{session_id}/resources/artifacts/{artifact_id}",
+        response_model=None,
+    )
+    async def get_session_artifact(
+        request: Request,
+        session_id: str,
+        artifact_id: str,
+    ) -> dict[str, Any]:
+        """
+        Retrieve metadata for one published artifact.
+
+        :param request: The incoming FastAPI request (for auth).
+        :param session_id: Session/conversation identifier.
+        :param artifact_id: Unique artifact identifier.
+        :returns: The session artifact resource object.
+        """
+        await _validate_session(session_id, request, LEVEL_READ)
+        artifacts, _ = _require_artifact_stores()
+        artifact = await asyncio.to_thread(artifacts.get, artifact_id, session_id)
+        if artifact is None:
+            raise OmnigentError(
+                "Artifact not found",
+                code=ErrorCode.NOT_FOUND,
+            )
+        return _session_artifact_to_resource(session_id, artifact)
+
+    @router.get(
+        "/sessions/{session_id}/resources/artifacts/{artifact_id}/content",
+        response_model=None,
+    )
+    async def get_session_artifact_content(
+        request: Request,
+        session_id: str,
+        artifact_id: str,
+    ) -> Response:
+        """
+        Stream an artifact's bytes, with byte-range support.
+
+        Serves ``Accept-Ranges: bytes`` and answers a single-range
+        ``Range`` request with 206 + ``Content-Range``. That is what makes
+        a video seekable in iOS Safari, which refuses to scrub a response
+        that can't be ranged.
+
+        Disposition is decided server-side from an explicit allowlist of
+        passive types, not from anything the publisher said: raster images,
+        video, audio, and PDF are served ``inline`` so the browser can play
+        them in place. Everything else — HTML, SVG, any unrecognised type —
+        is always ``attachment``. Artifact bytes are agent-authored, so an
+        inline ``text/html`` *or* ``image/svg+xml`` response would be stored
+        XSS in the server's own origin; both are active documents and
+        ``nosniff`` does not make either inert.
+
+        :param request: The incoming FastAPI request (for auth).
+        :param session_id: Session/conversation identifier.
+        :param artifact_id: Unique artifact identifier.
+        :returns: 200 with the whole representation, 206 for a satisfied
+            range, 304 for a still-valid cached copy, or 416.
+        """
+        await _validate_session(session_id, request, LEVEL_READ)
+        artifacts, blobs = _require_artifact_stores()
+        artifact = await asyncio.to_thread(artifacts.get, artifact_id, session_id)
+        if artifact is None:
+            raise OmnigentError(
+                "Artifact not found",
+                code=ErrorCode.NOT_FOUND,
+            )
+
+        # Artifact content is immutable per id, so the id is a strong
+        # validator and a still-valid cached copy is answered before the
+        # blob store is touched at all.
+        etag = _file_content_etag(artifact.id)
+        base_headers = {
+            "ETag": etag,
+            "Cache-Control": FILE_CONTENT_CACHE_CONTROL,
+            "Accept-Ranges": "bytes",
+            "X-Content-Type-Options": "nosniff",
+        }
+        if _if_none_match_matches(request.headers.get("if-none-match"), etag):
+            return Response(status_code=304, headers=base_headers)
+
+        inline = is_inline_servable(artifact.content_type)
+        disposition = (
+            _inline_disposition(artifact.filename)
+            if inline
+            else _attachment_disposition(artifact.filename)
+        )
+        headers = {**base_headers, "Content-Disposition": disposition}
+
+        content = await asyncio.to_thread(blobs.get, artifact.id)
+        size = len(content)
+        try:
+            byte_range = _parse_byte_range(request.headers.get("range"), size)
+        except _RangeNotSatisfiable:
+            return Response(
+                status_code=416,
+                headers={**headers, "Content-Range": f"bytes */{size}"},
+            )
+
+        if byte_range is None:
+            return StreamingResponse(
+                _iter_artifact_chunks(content),
+                media_type=artifact.content_type,
+                headers={**headers, "Content-Length": str(size)},
+            )
+        start, end = byte_range
+        return StreamingResponse(
+            _iter_artifact_chunks(content[start : end + 1]),
+            status_code=206,
+            media_type=artifact.content_type,
+            headers={
+                **headers,
+                "Content-Range": f"bytes {start}-{end}/{size}",
+                "Content-Length": str(end - start + 1),
+            },
+        )
 
     @router.post(
         "/sessions/{session_id}/resources/files:copy",

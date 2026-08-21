@@ -83,6 +83,7 @@ from omnigent.tools.builtins.os_env import (
     SysOsShellTool,
     SysOsWriteTool,
 )
+from omnigent.tools.builtins.publish_artifact import PublishArtifactTool
 from omnigent.tools.builtins.session_rename import SysSessionRenameTool
 from omnigent.tools.builtins.spawn import (
     # Shared contract values with the in-process sys_session_* tools. Imported
@@ -245,6 +246,11 @@ _FILE_TOOLS = frozenset(
         "list_files",  # from builtins registry; no standalone class
     }
 )
+
+# Priority 5c2: Artifact tools — runner calls the server artifact API.
+# Separate from _FILE_TOOLS: artifacts are agent-published deliverables a
+# human reviews, not attachments fed back into the model's context.
+_ARTIFACT_TOOLS = frozenset({PublishArtifactTool.name()})
 
 # Priority 5d: Terminal tools — runner-local TerminalRegistry.
 _TERMINAL_TOOLS = frozenset(
@@ -848,6 +854,7 @@ _ALL_LOCAL_TOOLS = (
     _OS_ENV_TOOLS
     | _REST_TOOLS
     | _FILE_TOOLS
+    | _ARTIFACT_TOOLS
     | _TERMINAL_TOOLS
     | _ASYNC_INBOX_TOOLS
     | _SUBAGENT_TOOLS
@@ -5498,6 +5505,15 @@ async def execute_tool(
                 agent_spec=agent_spec,
                 runner_workspace=runner_workspace,
             )
+        elif tool_name in _ARTIFACT_TOOLS:
+            output = await _execute_artifact_tool(
+                tool_name,
+                args,
+                server_client,
+                conversation_id=conversation_id,
+                agent_spec=agent_spec,
+                runner_workspace=runner_workspace,
+            )
         elif tool_name in _TERMINAL_TOOLS:
             output = await _execute_terminal_tool(
                 tool_name,
@@ -6307,6 +6323,116 @@ async def _execute_file_tool(
             return f"Error: list_files failed: {exc}"
 
     return f"Error: {tool_name} not implemented in file dispatch"
+
+
+async def _execute_artifact_tool(
+    tool_name: str,
+    args: _JsonObject,
+    server_client: httpx.AsyncClient | None,
+    *,
+    conversation_id: str | None,
+    agent_spec: AgentSpec | None = None,
+    runner_workspace: Path | None = None,
+) -> str:
+    """
+    Execute ``publish_artifact`` by POSTing to the server artifact API.
+
+    The server owns the type allowlist, the size caps, and the SSE
+    announcement; the runner's job is to resolve the agent-supplied path
+    inside the session workspace (the read happens in the un-sandboxed
+    runner process, so containment is enforced here exactly as it is for
+    ``upload_file``) and hand the bytes over.
+
+    :param tool_name: Artifact tool name, e.g. ``"publish_artifact"``.
+    :param args: Parsed tool arguments.
+    :param server_client: HTTP client for the Omnigent server.
+    :param conversation_id: Owning session/conversation id.
+    :param agent_spec: Agent spec resolved for the current turn, used
+        (with ``runner_workspace``) to derive the workspace root.
+    :param runner_workspace: Authoritative runtime cwd for the runner.
+    :returns: Tool result string.
+    """
+    if server_client is None:
+        return f"Error: {tool_name} requires server access"
+    if conversation_id is None:
+        return f"Error: {tool_name} requires a session id"
+    artifacts_path = f"/v1/sessions/{conversation_id}/resources/artifacts"
+
+    os_spec = _effective_runner_os_env_spec(agent_spec, conversation_id, runner_workspace)
+    assert os_spec.cwd is not None
+    workspace = Path(os_spec.cwd)
+
+    path = args.get("path")
+    if not isinstance(path, str) or not path:
+        return "Error: publish_artifact failed: empty path"
+    preview_path = args.get("preview_path")
+    if preview_path is not None and not isinstance(preview_path, str):
+        return "Error: publish_artifact failed: preview_path must be a string"
+
+    try:
+        resolved = safe_resolve(path, workspace)
+        preview_resolved = safe_resolve(preview_path, workspace) if preview_path else None
+    except ValueError as exc:
+        return f"Error: publish_artifact failed: {exc}"
+
+    async def _post(target: Path, form: dict[str, str]) -> _JsonObject | str:
+        """POST one file to the artifacts endpoint.
+
+        :param target: Absolute path to the file to publish.
+        :param form: Extra multipart form fields.
+        :returns: The parsed resource dict, or an ``"Error: …"`` string.
+        """
+        try:
+            # Streamed from the open handle rather than read into memory:
+            # an artifact is a whole render (the media cap is 512 MB by
+            # default), and the runner has no reason to hold one resident
+            # just to hand it to the server.
+            with open(target, "rb") as handle:
+                resp = await server_client.post(
+                    artifacts_path,
+                    files={"file": (target.name, handle)},
+                    data=form,
+                    timeout=300.0,
+                )
+        except Exception as exc:  # noqa: BLE001
+            return f"Error: publish_artifact failed: {exc}"
+        if resp.status_code not in (200, 201):
+            return f"Error: publish_artifact returned {resp.status_code}: {resp.text}"
+        return cast(_JsonObject, resp.json())
+
+    preview_artifact_id: str | None = None
+    if preview_resolved is not None:
+        # The preview needs an id before the artifact that references it.
+        published_preview = await _post(preview_resolved, {})
+        if isinstance(published_preview, str):
+            return published_preview
+        preview_id = published_preview.get("id")
+        preview_artifact_id = preview_id if isinstance(preview_id, str) else None
+
+    form: dict[str, str] = {}
+    for key in ("title", "description"):
+        value = args.get(key)
+        if isinstance(value, str) and value.strip():
+            form[key] = value.strip()
+    if preview_artifact_id:
+        form["preview_artifact_id"] = preview_artifact_id
+
+    published = await _post(resolved, form)
+    if isinstance(published, str):
+        return published
+    raw_metadata = published.get("metadata")
+    metadata: _JsonObject = raw_metadata if isinstance(raw_metadata, dict) else {}
+    return json.dumps(
+        {
+            "artifact_id": published.get("id"),
+            "filename": metadata.get("filename"),
+            "content_type": metadata.get("content_type"),
+            "render_category": metadata.get("render_category"),
+            "bytes": metadata.get("bytes"),
+            "title": metadata.get("title"),
+            "preview_artifact_id": metadata.get("preview_artifact_id") or preview_artifact_id,
+        }
+    )
 
 
 # ── Terminal tools (Phase 2) ──────────────────────────────

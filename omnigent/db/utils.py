@@ -776,6 +776,16 @@ def generate_file_id() -> str:
     return uuid.uuid4().hex
 
 
+def generate_session_artifact_id() -> str:
+    """
+    Generate a unique session-artifact identifier.
+
+    :returns: A bare 32-char hex uuid,
+        e.g. ``"b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7"``.
+    """
+    return uuid.uuid4().hex
+
+
 def generate_conversation_id() -> str:
     """
     Generate a unique conversation identifier.

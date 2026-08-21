@@ -50,6 +50,7 @@ from omnigent.entities import (
     ErrorData,
     MessageData,
     NewConversationItem,
+    SessionArtifact,
     SlashCommandData,
     StoredFile,
     synthesize_conversation_title,
@@ -623,8 +624,8 @@ async def _poll_request_disconnect_impl(request: Request) -> None:
             return
 
 
-def _attachment_disposition(filename: str) -> str:
-    """Build a safe ``Content-Disposition: attachment`` header value.
+def _content_disposition(filename: str, *, disposition: str) -> str:
+    """Build a safe ``Content-Disposition`` header value.
 
     The filename is user-controlled, so it cannot be interpolated
     into the header verbatim — a quote or newline would let the
@@ -634,7 +635,8 @@ def _attachment_disposition(filename: str) -> str:
     percent-encodes the full UTF-8 name for modern browsers.
 
     :param filename: The stored, user-supplied filename.
-    :returns: A ``Content-Disposition`` header value forcing download.
+    :param disposition: ``"attachment"`` or ``"inline"``.
+    :returns: A ``Content-Disposition`` header value.
     """
     # ASCII fallback: drop anything outside printable ASCII and the
     # characters that are structurally significant in the header.
@@ -642,7 +644,30 @@ def _attachment_disposition(filename: str) -> str:
     if not ascii_name:
         ascii_name = "download"
     encoded = urllib.parse.quote(filename, safe="")
-    return f"attachment; filename=\"{ascii_name}\"; filename*=UTF-8''{encoded}"
+    return f"{disposition}; filename=\"{ascii_name}\"; filename*=UTF-8''{encoded}"
+
+
+def _attachment_disposition(filename: str) -> str:
+    """Build a ``Content-Disposition: attachment`` header value.
+
+    :param filename: The stored, user-supplied filename.
+    :returns: A ``Content-Disposition`` header value forcing download.
+    """
+    return _content_disposition(filename, disposition="attachment")
+
+
+def _inline_disposition(filename: str) -> str:
+    """Build a ``Content-Disposition: inline`` header value.
+
+    Only ever used for artifact categories whose types a browser renders
+    as passive media (image / video / audio / PDF). Never for HTML or an
+    unrecognised type — those stay ``attachment`` so agent-authored bytes
+    can't execute in the server's origin.
+
+    :param filename: The stored, user-supplied filename.
+    :returns: A ``Content-Disposition`` header value allowing inline render.
+    """
+    return _content_disposition(filename, disposition="inline")
 
 
 # A file id maps to one set of bytes for the file's whole life — content is
@@ -701,6 +726,111 @@ def _stored_file_to_resource(
             "filename": stored.filename,
             "bytes": stored.bytes,
             "created_at": stored.created_at,
+        },
+    }
+
+
+class _RangeNotSatisfiable(Exception):
+    """A ``Range`` header asked for bytes outside the representation."""
+
+
+# A range offset is bare ASCII digits and nothing else. ``int()`` is far
+# more permissive — it accepts "+0", " 1", "1_0", and non-ASCII digits —
+# which would let a malformed spec through as a satisfiable range.
+#
+# The length cap matters as much as the character class: CPython refuses
+# to parse an integer literal past 4300 digits, so an all-digit offset
+# that long would match and then raise inside ``int()``. 19 digits spans
+# the whole 64-bit range, so nothing addressable is turned away.
+_RANGE_OFFSET_RE = re.compile(r"^[0-9]{1,19}$")
+
+
+def _parse_byte_range(header: str | None, size: int) -> tuple[int, int] | None:
+    """Resolve a ``Range`` request header against a representation size.
+
+    Implements the single-range ``bytes`` form iOS Safari uses to seek
+    inside a video. Anything else — a missing header, a non-``bytes``
+    unit, a malformed spec, an offset too long to be a real position, or
+    a multi-range request — returns ``None``, which callers answer with a
+    normal 200 (RFC 9110 requires an unparseable ``Range`` to be ignored
+    rather than rejected).
+
+    :param header: Raw ``Range`` value, or ``None`` when absent.
+    :param size: Total size of the representation in bytes.
+    :returns: Inclusive ``(start, end)`` offsets, or ``None`` to serve
+        the whole representation.
+    :raises _RangeNotSatisfiable: The range is well-formed but cannot be
+        satisfied — it starts past the end, or the representation is
+        empty — which must be answered with 416.
+    """
+    if not header:
+        return None
+    unit, sep_eq, spec = header.partition("=")
+    if not sep_eq or unit.strip().lower() != "bytes":
+        return None
+    spec = spec.strip()
+    if "," in spec:
+        return None
+    first, sep, last = spec.partition("-")
+    if not sep:
+        return None
+    if first and not _RANGE_OFFSET_RE.match(first):
+        return None
+    if last and not _RANGE_OFFSET_RE.match(last):
+        return None
+    if not first:
+        if not last:
+            return None
+        # Suffix form: the final N bytes. A zero-length suffix names no
+        # bytes, and an empty representation has none to give.
+        suffix = int(last)
+        if suffix <= 0 or size <= 0:
+            raise _RangeNotSatisfiable(header)
+        return max(0, size - suffix), size - 1
+    start = int(first)
+    # Order matters: a spec whose start is past the end is unsatisfiable
+    # (416), even when its end also parses below the start. An empty
+    # representation can satisfy no range at all.
+    if size <= 0 or start >= size:
+        raise _RangeNotSatisfiable(header)
+    end = min(int(last), size - 1) if last else size - 1
+    if end < start:
+        return None
+    return start, end
+
+
+def _session_artifact_to_resource(
+    session_id: str,
+    artifact: SessionArtifact,
+) -> dict[str, Any]:
+    """Convert a :class:`SessionArtifact` to a session resource dict.
+
+    Matches the ``session.resource`` shape with
+    ``type: "session_artifact"`` used by the artifact endpoints and the
+    ``session.resource.created`` event.
+
+    ``render_category`` is projected from the entity (which derives it
+    from the content type) so a client never has to sniff the bytes.
+
+    :param session_id: Owning session/conversation id.
+    :param artifact: The published artifact entity.
+    :returns: JSON-serializable resource dict.
+    """
+    return {
+        "id": artifact.id,
+        "object": "session.resource",
+        "type": "session_artifact",
+        "session_id": session_id,
+        "name": artifact.title or artifact.filename,
+        "metadata": {
+            "filename": artifact.filename,
+            "content_type": artifact.content_type,
+            "bytes": artifact.bytes,
+            "created_at": artifact.created_at,
+            "render_category": artifact.render_category,
+            "title": artifact.title,
+            "description": artifact.description,
+            "preview_artifact_id": artifact.preview_artifact_id,
         },
     }
 
@@ -9162,7 +9292,12 @@ async def _handle_mcp_tools_list(
     return _mcp_ok_response(rpc_id, {"tools": tools})
 
 
-async def _read_upload_capped(file: UploadFile, limit_bytes: int) -> bytes:
+async def _read_upload_capped(
+    file: UploadFile,
+    limit_bytes: int,
+    *,
+    noun: str = "Attachment",
+) -> bytes:
     """
     Read an uploaded file into memory, aborting if it exceeds *limit_bytes*.
 
@@ -9172,6 +9307,9 @@ async def _read_upload_capped(file: UploadFile, limit_bytes: int) -> bytes:
 
     :param file: The multipart upload.
     :param limit_bytes: Maximum allowed size in bytes.
+    :param noun: What the caller is uploading, used in the 413 message
+        (``"Attachment"`` for session files, ``"Artifact"`` for published
+        artifacts).
     :returns: The full file content.
     :raises HTTPException: 413 when the upload exceeds *limit_bytes*.
     """
@@ -9186,7 +9324,7 @@ async def _read_upload_capped(file: UploadFile, limit_bytes: int) -> bytes:
             raise HTTPException(
                 status_code=413,
                 detail=(
-                    f"Attachment exceeds the {limit_bytes // (1024 * 1024)} MB "
+                    f"{noun} exceeds the {limit_bytes // (1024 * 1024)} MB "
                     "limit for this file type."
                 ),
             )
@@ -9514,6 +9652,7 @@ __all__ = [
     "SessionLiveness",
     "_HostLaunchAttempt",
     "_NativeTerminalEnsureOutcome",
+    "_RangeNotSatisfiable",
     "_RunnerForwardResult",
     "_SessionEventDispatchResult",
     "_add_model_usage_delta",
@@ -9552,6 +9691,7 @@ __all__ = [
     "_collect_descendant_conversation_ids",
     "_compact_lock",
     "_consume_pre_resolved_harness_elicitation",
+    "_content_disposition",
     "_create_and_publish_antigravity_child",
     "_create_and_publish_codex_child",
     "_create_session_worktree",
@@ -9583,6 +9723,7 @@ __all__ = [
     "_handle_mcp_tools_list",
     "_host_model_options_via_registry",
     "_if_none_match_matches",
+    "_inline_disposition",
     "_invalidate_runner_backed_snapshot_state",
     "_is_codex_native_subagent",
     "_is_kiro_native_session",
@@ -9612,6 +9753,7 @@ __all__ = [
     "_native_terminal_name_for_harness",
     "_notify_runner_of_bundled_child",
     "_owner_from_grants",
+    "_parse_byte_range",
     "_parse_external_assistant_message",
     "_parse_external_conversation_item",
     "_parse_session_create_metadata",
@@ -9697,6 +9839,7 @@ __all__ = [
     "_same_provider_family_impl",
     "_seed_missing_title",
     "_seed_missing_title_from_user_message",
+    "_session_artifact_to_resource",
     "_session_status_from_cache",
     "_session_status_with_child_rollup",
     "_set_read_state",

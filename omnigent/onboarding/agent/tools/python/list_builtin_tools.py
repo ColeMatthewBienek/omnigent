@@ -26,6 +26,10 @@ _TOOL_CLASSES: dict[str, tuple[str, str]] = {
         "SearchConversationsTool",
     ),
     "upload_file": ("omnigent.tools.builtins.upload_file", "UploadFileTool"),
+    "publish_artifact": (
+        "omnigent.tools.builtins.publish_artifact",
+        "PublishArtifactTool",
+    ),
     "web_fetch": ("omnigent.tools.builtins.web_fetch", "WebFetchTool"),
     "web_search": ("omnigent.tools.builtins.web_search", "WebSearchTool"),
 }

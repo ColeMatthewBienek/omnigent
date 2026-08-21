@@ -9,6 +9,7 @@ import {
   PanelRightCloseIcon,
   PanelRightIcon,
   ShareIcon,
+  SparklesIcon,
   TerminalIcon,
   UserPlusIcon,
 } from "lucide-react";
@@ -52,6 +53,8 @@ interface MobileSessionMenuProps {
   subagentsPanelOpen: boolean;
   /** True while the mobile shells drawer is open. */
   shellsPanelOpen: boolean;
+  /** True while the artifacts drawer is open. */
+  artifactsPanelOpen: boolean;
   /** Hide the Shells entry (claude-native sub-agents only). */
   hideTerminalsTab: boolean;
   /** Whether the Shells entry is available. */
@@ -77,6 +80,10 @@ interface MobileSessionMenuProps {
   onOpenShells: () => void;
   /** Open the mobile agents drawer. */
   onOpenSubagents: () => void;
+  /** Open the artifacts drawer (agent-published work products). */
+  onOpenArtifacts: () => void;
+  /** Number of published artifacts (Artifacts entry badge). */
+  artifactCount: number;
   /** Open the main execution-log push panel. */
   onOpenMainExecutionLog: () => void;
 }
@@ -149,6 +156,10 @@ interface ChatHeaderProps {
   rightPanelOpen: boolean;
   /** Toggle the right workspace panel. */
   onToggleRightPanel: () => void;
+  /** Open the artifacts panel (desktop right rail / mobile drawer). */
+  onOpenArtifacts: () => void;
+  /** Number of published artifacts (Artifacts button badge). */
+  artifactCount: number;
   /** Gating + handlers for the mobile session-menu FAB. */
   mobileMenu: MobileSessionMenuProps;
 }
@@ -164,7 +175,7 @@ interface ChatHeaderProps {
  * terminal-first via ``pt-14``). Left slot: open-sidebar + a conversation
  * breadcrumb (``[folder] / <title> [/ <sub-agent>]``). Right slot: desktop
  * action buttons (Agent info ·
- * Share · right-panel toggle), a mobile three-dot menu mirroring the
+ * Share · Artifacts · right-panel toggle), a mobile three-dot menu mirroring the
  * same actions, and a mobile FAB that opens the rail tabs as
  * full-screen drawers. Stop session lives in the sidebar row's kebab
  * menu; Clone lives on each assistant message's "Fork from here"
@@ -193,6 +204,8 @@ export function ChatHeader({
   hasRailContent,
   rightPanelOpen,
   onToggleRightPanel,
+  onOpenArtifacts,
+  artifactCount,
   mobileMenu,
 }: ChatHeaderProps) {
   // Dwell on the toggle for 1s to peek the sidebar; leaving before then cancels
@@ -398,6 +411,39 @@ export function ChatHeader({
             Share
           </Button>
         ) : null}
+        {/* Artifacts — the agent's published deliverables. Always offered
+            on desktop (not gated on hasRailContent: artifacts are their own
+            panel, not a workspace-rail tab), so the user can check for work
+            before the first one lands. The mobile route in is the session
+            menu below. */}
+        {conversationId && (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-xs"
+                aria-label="Artifacts"
+                onClick={onOpenArtifacts}
+                className="relative hidden md:inline-flex text-muted-foreground hover:text-foreground border-none"
+              >
+                <SparklesIcon className="size-4" />
+                {artifactCount > 0 && (
+                  <span
+                    data-testid="artifact-count-badge"
+                    className={cn(
+                      TAB_BADGE_BASE,
+                      "absolute -right-1 -top-1 bg-muted text-muted-foreground",
+                    )}
+                  >
+                    {artifactCount}
+                  </span>
+                )}
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>Artifacts</TooltipContent>
+          </Tooltip>
+        )}
         {conversationId && hasRailContent && (
           <Tooltip>
             <TooltipTrigger asChild>
@@ -438,6 +484,7 @@ export function ChatHeader({
           !mobileMenu.filesPanelOpen &&
           !mobileMenu.subagentsPanelOpen &&
           !mobileMenu.shellsPanelOpen &&
+          !mobileMenu.artifactsPanelOpen &&
           (hasRailContent || mobileMenu.debugMode) && (
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
@@ -521,6 +568,21 @@ export function ChatHeader({
                     )}
                   </DropdownMenuItem>
                 )}
+                {/* Artifacts — the agent's published deliverables. Always
+                    reachable so the user can check for work even before the
+                    first one lands (the badge shows the count once it does). */}
+                <DropdownMenuItem
+                  onSelect={mobileMenu.onOpenArtifacts}
+                  className="gap-2.5 px-2.5 py-2 text-ui"
+                >
+                  <SparklesIcon className="size-4" />
+                  Artifacts
+                  {mobileMenu.artifactCount > 0 && (
+                    <span className={cn(TAB_BADGE_BASE, "ml-auto bg-muted text-muted-foreground")}>
+                      {mobileMenu.artifactCount}
+                    </span>
+                  )}
+                </DropdownMenuItem>
                 {mobileMenu.debugMode && (
                   <DropdownMenuItem
                     onSelect={mobileMenu.onOpenMainExecutionLog}

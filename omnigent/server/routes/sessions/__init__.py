@@ -732,6 +732,7 @@ from omnigent.stores.conversation_store import (
 from omnigent.stores.file_store import FileStore
 from omnigent.stores.permission_store import PermissionStore
 from omnigent.stores.project_store import ProjectStore
+from omnigent.stores.session_artifact_store import SessionArtifactStore
 from omnigent.telemetry import emit as _tel_emit
 from omnigent.telemetry.events import SessionDeletedEvent as _TelSessionDeletedEvent
 from omnigent.telemetry.events import SessionStoppedEvent as _TelSessionStoppedEvent
@@ -786,6 +787,7 @@ def create_sessions_router(
     agent_store: AgentStore,
     file_store: FileStore | None = None,
     artifact_store: ArtifactStore | None = None,
+    session_artifact_store: SessionArtifactStore | None = None,
     runner_router: RunnerRouter | None = None,
     auth_provider: AuthProvider | None = None,
     permission_store: PermissionStore | None = None,
@@ -816,6 +818,9 @@ def create_sessions_router(
     :param artifact_store: Store for binary file content and agent
         bundles. Required for bundled session creation and session
         file upload/download.
+    :param session_artifact_store: Store for published session-artifact
+        metadata. Required for the session artifact endpoints; ``None``
+        in setups that don't expose them.
     :param runner_router: Router used to validate registered
         runners for ``PATCH /v1/sessions/{id}``. ``None`` only in
         tests that do not exercise runner binding.
@@ -924,6 +929,7 @@ def create_sessions_router(
         agent_store=agent_store,
         file_store=file_store,
         artifact_store=artifact_store,
+        session_artifact_store=session_artifact_store,
         runner_router=runner_router,
         auth_provider=auth_provider,
         permission_store=permission_store,
