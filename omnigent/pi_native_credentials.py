@@ -87,6 +87,14 @@ _PI_OPENAI_PROVIDER_ID = "omnigent-openai"
 _PI_COMPLETIONS_PROVIDER_ID = "omnigent-completions"
 _PI_MLFLOW_PROVIDER_ID = "omnigent-mlflow"
 
+# llama.cpp exposes this local Qwen endpoint with a 98,304-token server
+# context. Pi otherwise defaults custom OpenAI-compatible models to 128k and
+# tries to compact after llama.cpp has already rejected the prompt.
+_LOCAL_QWEN_MODEL = "huihui_ai/Qwen3.8-abliterated:27b"
+_LOCAL_QWEN_BASE_URL = "http://127.0.0.1:8080/v1"
+_LOCAL_QWEN_CONTEXT_WINDOW = 98_304
+_LOCAL_QWEN_COMPACTION_RESERVE_TOKENS = 32_768
+
 # Which provider id serves each Databricks gateway surface. The Anthropic
 # surface is the primary provider, so it is registered inline, not here.
 _SURFACE_PROVIDER_IDS: dict[DatabricksPiSurface, str] = {
@@ -224,6 +232,8 @@ class PiProviderConfig:
     model: str
     api_key: str
     auth_header: bool
+    context_window: int | None = None
+    compaction_reserve_tokens: int | None = None
     credential_warning: str | None = None
     # Full model list for providers that expose multiple models (e.g. the
     # Databricks Anthropic gateway). Excluded from __hash__ so the frozen
@@ -307,10 +317,13 @@ class PiProviderConfig:
             surface = self._fallback_surface()
             if not self._primary_claude_only:
                 # The primary's api came from the model's own family.
+                model_entry: _PiModelEntry = {"id": self.model}
+                if self.context_window is not None:
+                    model_entry["contextWindow"] = self.context_window
                 models.append(
-                    {"id": self.model, "input": ["text", "image"]}
+                    {**model_entry, "input": ["text", "image"]}
                     if self.extra_models
-                    else {"id": self.model}
+                    else model_entry
                 )
             elif surface is DatabricksPiSurface.ANTHROPIC:
                 models.append({"id": self.model, "input": ["text", "image"]})
@@ -978,6 +991,14 @@ def _inline_family_pi_provider(
         # Strip bracket suffixes (e.g. "[1m]") — accepted by the direct
         # Anthropic API but rejected by the Databricks AI Gateway.
         resolved_model = re.sub(r"\[.*?\]$", "", resolved_model)
+        context_window = None
+        compaction_reserve_tokens = None
+        if (
+            family.base_url.rstrip("/") == _LOCAL_QWEN_BASE_URL
+            and resolved_model == _LOCAL_QWEN_MODEL
+        ):
+            context_window = _LOCAL_QWEN_CONTEXT_WINDOW
+            compaction_reserve_tokens = _LOCAL_QWEN_COMPACTION_RESERVE_TOKENS
         return PiProviderConfig(
             provider_id=_PI_PROVIDER_ID,
             base_url=family.base_url,
@@ -985,6 +1006,8 @@ def _inline_family_pi_provider(
             model=resolved_model,
             api_key=api_key,
             auth_header=auth_header,
+            context_window=context_window,
+            compaction_reserve_tokens=compaction_reserve_tokens,
         )
     return None
 
@@ -1170,7 +1193,13 @@ def pi_native_provider_launch(
     # key; Pi's getDefaultThinkingLevel() returns null (falsy) → no thinking.
     from omnigent.inner.pi_settings import prepare_managed_pi_agent_dir
 
-    prepare_managed_pi_agent_dir(agent_dir, overlay={"defaultThinkingLevel": None})
+    settings_overlay: dict[str, object] = {"defaultThinkingLevel": None}
+    if provider.compaction_reserve_tokens is not None:
+        settings_overlay["compaction"] = {
+            "enabled": True,
+            "reserveTokens": provider.compaction_reserve_tokens,
+        }
+    prepare_managed_pi_agent_dir(agent_dir, overlay=settings_overlay)
     env = {PI_CODING_AGENT_DIR_ENV_VAR: str(agent_dir)}
     # When the model id contains a "/" Pi's arg parser splits on the first
     # slash and treats the left part as a provider name, overriding

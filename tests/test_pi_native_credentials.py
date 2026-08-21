@@ -154,6 +154,42 @@ def test_key_provider_resolves_to_inline_family() -> None:
     assert provider.model == "claude-sonnet-4-6"
 
 
+def test_local_qwen_launch_advertises_context_and_proactive_compaction(
+    tmp_path: Path,
+) -> None:
+    """A local Qwen session compacts before reaching its llama.cpp limit."""
+    config = {
+        "providers": {
+            "llamacpp": {
+                "kind": "local",
+                "default": True,
+                "openai": {
+                    "api_key": "local",
+                    "base_url": "http://127.0.0.1:8080/v1",
+                    "models": {"default": "huihui_ai/Qwen3.8-abliterated:27b"},
+                    "wire_api": "chat",
+                },
+            }
+        }
+    }
+
+    provider = creds.resolve_pi_native_provider(config_loader=lambda: config)
+
+    assert provider is not None
+    agent_dir = tmp_path / "pi-agent"
+    creds.pi_native_provider_launch(agent_dir, provider)
+
+    models = json.loads((agent_dir / "models.json").read_text(encoding="utf-8"))
+    assert models["providers"]["omnigent"]["models"] == [
+        {"id": "huihui_ai/Qwen3.8-abliterated:27b", "contextWindow": 98_304}
+    ]
+    settings = json.loads((agent_dir / "settings.json").read_text(encoding="utf-8"))
+    assert settings["compaction"] == {
+        "enabled": True,
+        "reserveTokens": 32_768,
+    }
+
+
 def test_managed_picker_prefix_is_not_part_of_provider_model() -> None:
     """A managed picker value resolves its provider-local model id."""
     config = {
