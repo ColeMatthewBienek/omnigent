@@ -2983,11 +2983,13 @@ def _claim_foreground_daemon_record(
     """
     conflict = _live_daemon_conflict(record)
     if conflict is not None:
+        # server_url is None in local mode; "" makes the hint say --server "".
+        stop_command = _host_stop_command(conflict.server_url or "")
         raise click.ClickException(
             "A host daemon is already running for this server "
             f"(pid={conflict.pid}, target={conflict.target}). "
-            "Run `omnigent host status` to inspect it or "
-            "`omnigent host stop --server ...` to stop it first."
+            f"Run `omnigent host status` to inspect it or `{stop_command}` "
+            "to stop it first."
         )
     previous = _find_daemon_record(record.target)
     if previous is not None and not _pid_alive(previous.pid):
@@ -3172,9 +3174,10 @@ def _ensure_databricks_server_auth(server: str, *, non_interactive: bool = False
     today. A non-200 answer that carries the Databricks edge signature
     (302 to the workspace OAuth page, or a DatabricksRealm 401) means
     the run would otherwise die much later with an opaque "non-JSON
-    response (status=302)" traceback from the session-create call. On a
-    TTY we run the same flow ``omnigent login`` would and continue;
-    headless invocations get the exact command to run instead.
+    response (status=302)" traceback from the session-create call. First,
+    it asks the SDK for a fresh workspace token; only then does a TTY run
+    the same flow ``omnigent login`` would, while headless invocations get
+    the exact command to run instead.
 
     Non-Databricks postures are deliberately left alone: local accounts
     servers auto-authenticate downstream (magic-link redeem), and
@@ -3194,6 +3197,7 @@ def _ensure_databricks_server_auth(server: str, *, non_interactive: bool = False
     import httpx as _httpx
 
     from omnigent.chat import _remote_headers
+    from omnigent.cli_auth import load_databricks_org_id, store_databricks_auth
 
     try:
         probe = _httpx.get(
@@ -3210,6 +3214,13 @@ def _ensure_databricks_server_auth(server: str, *, non_interactive: bool = False
     workspace_host = _databricks_workspace_login_target(server, probe)
     if workspace_host is None:
         return
+    org_id = load_databricks_org_id(server)
+    token = _databricks_workspace_token(workspace_host)
+    if token is not None:
+        refreshed_probe = _verify_databricks_server_token(server, token, org_id)
+        if refreshed_probe.status_code == 200:
+            store_databricks_auth(server, workspace_host, org_id=org_id)
+            return
     login_cmd = f"omnigent login {server}"
     if non_interactive or not sys.stdin.isatty():
         raise click.ClickException(
@@ -3217,11 +3228,7 @@ def _ensure_databricks_server_auth(server: str, *, non_interactive: bool = False
             f"HTTP {probe.status_code}). Run `{login_cmd}` and retry."
         )
     click.echo(f"Not signed in to {server} — running `{login_cmd}` first.")
-    # Recover the ``?o=`` selector from a prior login record so a re-login
-    # still targets the right workspace.
-    from omnigent.cli_auth import load_databricks_org_id
-
-    _databricks_login(server, workspace_host, org_id=load_databricks_org_id(server))
+    _databricks_login(server, workspace_host, org_id=org_id)
 
 
 def _ensure_backend(server: str | None) -> str:
@@ -5748,6 +5755,7 @@ def import_session_command(
     import httpx
 
     from omnigent.chat import _remote_headers
+    from omnigent.conversation_browser import conversation_url
     from omnigent.session_import import (
         ImportSource,
         SessionImportNotFoundError,
@@ -5853,13 +5861,17 @@ def import_session_command(
             )
             continue
         imported_count += 1
+        # Surface the browser URL, not the bare id, so the user can open the
+        # imported session straight into the web (where it offers the resume
+        # picker). Maps a Databricks API base to its workspace SPA link.
+        session_link = conversation_url(base_url, session_id)
         if is_batch:
             click.echo(
                 f"Imported {item_count} item(s) from {current_source_session_id} "
-                f"into {session_id}."
+                f"into {session_link}"
             )
         else:
-            click.echo(f"Imported {item_count} item(s) into {session_id}.")
+            click.echo(f"Imported {item_count} item(s) into {session_link}")
 
     if is_batch:
         click.echo(f"\nImported: {imported_count}")
@@ -9201,6 +9213,50 @@ def _stop_daemon_sessions(
     return stopped
 
 
+def _signal_daemon_pid(record: _HostDaemonRecord, sig: int) -> bool:
+    """
+    Signal a daemon's recorded PID, tolerating a stale foreign entry.
+
+    A daemon registry record can outlive the process it names. The recorded
+    PID may since have been reused by an unrelated process — often owned by
+    another user — or the real daemon may have been started under a different
+    account (e.g. ``sudo``). In both cases the PID is no longer this user's
+    daemon and must not be killed.
+
+    ``os.kill`` raises ``PermissionError`` (EPERM) when the caller lacks
+    permission to signal the target — which, since we only ever signal our
+    own daemons, means the record is stale and points at someone else's
+    process. ``_pid_alive`` reports such a PID as alive (``psutil`` maps the
+    same permission failure to ``AccessDenied``), so without this guard
+    ``_terminate_daemon`` would fall through to ``os.kill`` and crash on the
+    unsuppressed EPERM — ``--force`` included, since it dies before the
+    SIGKILL path. Log a warning and treat the record as stale instead.
+
+    :param record: Daemon record whose PID should be signalled.
+    :param sig: Signal number to send, e.g. ``signal.SIGTERM``.
+    :returns: ``True`` if the record is stale and the caller should drop it
+        and stop (either the PID is not ours, or it already exited); ``False``
+        if the signal was delivered and termination should proceed as usual.
+    """
+    try:
+        os.kill(record.pid, sig)
+    except ProcessLookupError:
+        # The process exited between the liveness check and the signal —
+        # nothing left to kill, so the record is stale.
+        return True
+    except PermissionError:
+        # Not our daemon: the record points at another user's process (PID
+        # reuse, or a daemon started under a different account). Drop the
+        # stale record and warn rather than crashing the CLI on the EPERM.
+        click.echo(
+            f"Skipping stale daemon record for {record.target!r}: pid "
+            f"{record.pid} is owned by another user and is not this daemon.",
+            err=True,
+        )
+        return True
+    return False
+
+
 def _terminate_daemon(record: _HostDaemonRecord, *, force: bool) -> None:
     """
     Terminate one local daemon process.
@@ -9212,8 +9268,9 @@ def _terminate_daemon(record: _HostDaemonRecord, *, force: bool) -> None:
     if not _pid_alive(record.pid):
         _delete_daemon_record(record)
         return
-    with contextlib.suppress(ProcessLookupError):
-        os.kill(record.pid, signal.SIGTERM)
+    if _signal_daemon_pid(record, signal.SIGTERM):
+        _delete_daemon_record(record)
+        return
     deadline = time.monotonic() + _HOST_DAEMON_STOP_GRACE_S
     while time.monotonic() < deadline:
         if not _pid_alive(record.pid):
@@ -9221,8 +9278,9 @@ def _terminate_daemon(record: _HostDaemonRecord, *, force: bool) -> None:
             return
         time.sleep(0.1)
     if force:
-        with contextlib.suppress(ProcessLookupError):
-            os.kill(record.pid, getattr(signal, "SIGKILL", signal.SIGTERM))
+        if _signal_daemon_pid(record, getattr(signal, "SIGKILL", signal.SIGTERM)):
+            _delete_daemon_record(record)
+            return
         deadline = time.monotonic() + 2.0
         while time.monotonic() < deadline:
             if not _pid_alive(record.pid):
@@ -10905,6 +10963,12 @@ def _run_databricks_browser_login(workspace_host: str, org_id: str | None = None
         the workspace rejects it).
     :raises click.ClickException: When the Databricks CLI binary is
         missing or the login exits non-zero.
+
+    The login writes to a ``.databrickscfg`` profile named after the
+    workspace's first DNS label (e.g. ``acme`` for
+    ``acme.cloud.databricks.com``), keeping distinct workspaces off the
+    shared ``DEFAULT`` profile. The OAuth grant itself stays host-keyed,
+    so :func:`_databricks_workspace_token` still resolves it by host.
     """
     databricks_bin = shutil.which("databricks")
     if databricks_bin is None:
@@ -10913,14 +10977,21 @@ def _run_databricks_browser_login(workspace_host: str, org_id: str | None = None
             "Install it first: https://docs.databricks.com/dev-tools/cli/install.html"
         )
     login_host = _host_with_org(workspace_host, org_id)
-    click.echo(f"Opening browser to log in to {login_host} ...")
+    # Pin the grant to a profile named for the workspace's first DNS label so
+    # distinct workspaces don't clobber each other under the CLI's ``DEFAULT``.
+    from urllib.parse import urlsplit
+
+    split = urlsplit(workspace_host.rstrip("/"))
+    host = split.hostname or split.netloc or split.path
+    profile = host.split(".")[0]
+    click.echo(f"Opening browser to log in to {login_host} (profile {profile}) ...")
     result = subprocess.run(
-        [databricks_bin, "auth", "login", "--host", login_host],
+        [databricks_bin, "auth", "login", "--host", login_host, "--profile", profile],
         check=False,
     )
     if result.returncode != 0:
         raise click.ClickException(
-            f"`databricks auth login --host {login_host}` failed "
+            f"`databricks auth login --host {login_host} --profile {profile}` failed "
             f"(exit {result.returncode}). If the workspace is unreachable from "
             "this machine (VPN / IP access lists), resolve that and retry."
         )
@@ -10973,7 +11044,7 @@ def _databricks_workspace_token(workspace_host: str) -> str | None:
     try:
         auth, _host = _resolve_databricks_auth(host=workspace_host)
         return auth.current_token()
-    except (DatabricksAuthError, ValueError):
+    except (DatabricksAuthError, ImportError, ValueError):
         return None
 
 
